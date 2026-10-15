@@ -3,6 +3,9 @@
 **/dist
 **/.git
 **/node_modules
+**/.next
+**/.next-production
+.opengame/
 .docker
 .DS_Store
 .env

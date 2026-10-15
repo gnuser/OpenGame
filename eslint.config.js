@@ -25,6 +25,8 @@ export default tseslint.config(
       'packages/**/.integration-test/**',
       'dist/**',
       'docs-site/.next/**',
+      'packages/web/.next/**',
+      '.opengame/**',
       'docs-site/out/**',
       // agent-test/ is the agent's template corpus (game scaffolding,
       // template-skills, test cases) — vendored runtime fixtures rather
