@@ -121,7 +121,10 @@ export async function listProjects(ownerId?: string): Promise<Project[]> {
   await migrate();
   return (
     await pool().query(
-      'SELECT * FROM studio_projects WHERE ($1::uuid IS NULL OR owner_id=$1) ORDER BY updated_at DESC',
+      `SELECT p.*, ${engagementColumns}
+       FROM studio_projects p
+       WHERE ($1::uuid IS NULL OR p.owner_id=$1)
+       ORDER BY p.updated_at DESC`,
       [ownerId || null],
     )
   ).rows;

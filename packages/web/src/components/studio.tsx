@@ -12,6 +12,7 @@ import {
   ChevronLeft,
   Clock3,
   Copy,
+  Eye,
   Gamepad2,
   History,
   LoaderCircle,
@@ -28,10 +29,11 @@ import {
   Smartphone,
   Sparkles,
   Square,
+  ThumbsUp,
   X,
 } from 'lucide-react';
 import type { GameVersion, Job, Project, ProjectDetail } from '@/shared/types';
-import { phaseLabels } from '@/shared/types';
+import { approvalLabel, phaseLabels } from '@/shared/types';
 import { AccountMenu, useSession } from './access-gate';
 import { DevelopmentProcess, PlanSummary } from './development-process';
 import { GameFrame } from './game-frame';
@@ -581,6 +583,19 @@ export function Studio({
                     <div className="project-info">
                       <h3>{project.title}</h3>
                       <p>{project.description}</p>
+                      <div className="marketplace-stats">
+                        <span title="玩家好评率">
+                          <ThumbsUp size={14} />
+                          {approvalLabel({
+                            likes: project.likes ?? 0,
+                            dislikes: project.dislikes ?? 0,
+                          })}
+                        </span>
+                        <span title="游戏页面访问次数">
+                          <Eye size={14} />
+                          {(project.visits ?? 0).toLocaleString('zh-CN')} 次访问
+                        </span>
+                      </div>
                       <div>
                         <span>{date(project.updated_at)}</span>
                         <ArrowUpRight size={16} />
