@@ -39,9 +39,10 @@ export function KnowledgeLibrary() {
     }
   }, []);
   useEffect(() => {
+    const requests = requestId;
     void load('');
     return () => {
-      requestId.current++;
+      requests.current++;
     };
   }, [load]);
   const seedCount = entries.filter((entry) => entry.origin === 'seed').length;

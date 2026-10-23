@@ -6,7 +6,6 @@ root.innerHTML = `<div class="star-app"><div class="star-top"><span>STARDUST VOY
 const style = document.createElement('style');
 style.textContent = `.star-app{position:relative;min-height:100vh;overflow:hidden;background:#11172b}.star-top,.star-bottom{position:absolute;left:24px;right:24px;display:flex;justify-content:space-between;align-items:center;z-index:3;font-size:11px;color:#a6b3d1;letter-spacing:2px}.star-top{top:22px}.star-bottom{bottom:20px;letter-spacing:.5px}#cover{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:30px;z-index:4;background:linear-gradient(#11172b00,#11172b44)}#cover[hidden]{display:none}.kicker{color:#b8b0df;font-size:10px;letter-spacing:3px}#cover h1{font-size:42px;letter-spacing:8px;font-weight:500;margin:15px 0}#cover p{font-size:12px;color:#a2acc4;margin:0 0 28px}#start-game{border:0;background:#eeebff;color:#292741;padding:12px 25px;border-radius:9px}#cover small{font-size:10px;color:#8994af;margin-top:18px}#restart-game{background:#1e2942;border:1px solid #394461;color:#d1d9e8;border-radius:7px;padding:7px 11px;font-size:11px}#canvas{width:100%;height:100vh;min-height:340px}canvas{touch-action:none}@media(max-width:400px){#cover h1{font-size:31px;letter-spacing:5px}.star-top,.star-bottom{left:14px;right:14px;font-size:10px}}`;
 document.head.append(style);
-let scene: Voyage;
 class Voyage extends Phaser.Scene {
   private ship!: Phaser.GameObjects.Graphics;
   private stars: Phaser.GameObjects.Arc[] = [];
@@ -20,7 +19,6 @@ class Voyage extends Phaser.Scene {
   private invulnerable = 0;
   constructor() {
     super('voyage');
-    scene = this;
   }
   create() {
     const { width: w, height: h } = this.scale;
@@ -164,13 +162,14 @@ class Voyage extends Phaser.Scene {
     });
   }
 }
+const scene = new Voyage();
 new Phaser.Game({
   type: Phaser.CANVAS,
   parent: 'canvas',
   backgroundColor: '#11172b',
   width: Math.max(320, innerWidth),
   height: Math.max(340, innerHeight),
-  scene: Voyage,
+  scene,
   scale: { mode: Phaser.Scale.FIT, autoCenter: Phaser.Scale.CENTER_BOTH },
   render: { antialias: true },
 });

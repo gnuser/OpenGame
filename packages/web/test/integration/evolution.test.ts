@@ -9,15 +9,12 @@ const { databaseUrl, appOrigin } = await import('../../src/server/config');
 const { pool, migrate } = await import('../../src/server/db');
 const { createInvitation } = await import('../../src/server/access');
 const { dispatch } = await import('../../src/server/api');
-const { submitJob, claimJob, finishVersion, getProject } = await import(
-  '../../src/server/store'
-);
-const { loadKnowledge, selectKnowledge, snapshotKnowledge } = await import(
-  '../../src/server/knowledge'
-);
-const { regressionSuite } = await import(
-  '../../src/server/evolution-regression'
-);
+const { submitJob, claimJob, finishVersion, getProject } =
+  await import('../../src/server/store');
+const { loadKnowledge, selectKnowledge, snapshotKnowledge } =
+  await import('../../src/server/knowledge');
+const { regressionSuite } =
+  await import('../../src/server/evolution-regression');
 const { recoverEvolutionChecks } = await import('../../src/server/evolution');
 let admin: pg.Client;
 const name = `opengame_evolution_test_${process.pid}`;

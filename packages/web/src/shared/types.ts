@@ -17,6 +17,7 @@ export type Phase =
   | 'saving'
   | 'done';
 export interface Project {
+  media_kind?: 'game' | 'image';
   id: string;
   owner_id?: string | null;
   likes?: number;
@@ -32,6 +33,16 @@ export interface Project {
   updated_at: string;
 }
 export interface ValidationReport {
+  quality?: import('./game-quality').GameQualityReport;
+  images?: Array<{
+    file: string;
+    label: string;
+    batchIndex: number;
+    width: number;
+    height: number;
+    format: string;
+  }>;
+  image?: { width: number; height: number; format: string };
   build: boolean;
   browser: boolean;
   start: boolean;
@@ -57,6 +68,11 @@ export interface GameVersion {
   created_at: string;
 }
 export interface Job {
+  image_batch_id?: string | null;
+  image_batch_index?: number | null;
+  image_reference_version_id?: string | null;
+  image_asset_id?: string | null;
+  model?: import('./models').GenerationModel;
   kind?: 'chat' | 'build';
   plan?: DevelopmentPlan | null;
   planning_reply?: string | null;
@@ -102,6 +118,7 @@ export interface Message {
   created_at: string;
 }
 export interface ProjectDetail {
+  imageBatches?: Array<import('./image-batch').ImageBatch>;
   project: Project;
   versions: GameVersion[];
   jobs: Job[];
@@ -125,7 +142,11 @@ export interface GameStats {
   visits: number;
   myRating: -1 | 0 | 1;
 }
-export function approvalLabel(stats: Pick<GameStats, 'likes' | 'dislikes'>): string {
+export function approvalLabel(
+  stats: Pick<GameStats, 'likes' | 'dislikes'>,
+): string {
   const total = stats.likes + stats.dislikes;
-  return total ? `${Math.round(stats.likes / total * 100)}% 好评` : '暂无评价';
+  return total
+    ? `${Math.round((stats.likes / total) * 100)}% 好评`
+    : '暂无评价';
 }

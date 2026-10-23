@@ -1,3 +1,4 @@
+import { generationTimeout } from './model-runtime';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { webRoot } from './config';
@@ -8,11 +9,13 @@ import {
 
 export async function runCodex(options: {
   cwd: string;
+  model?: import('../shared/models').GenerationModel;
   prompt: string;
   images?: string[];
   readOnly?: boolean;
   maxReplyChars?: number;
   signal: AbortSignal;
+  onThreadStarted?: (id: string) => void;
   onMessage: (message: string) => void;
   onUsage: (usage: unknown) => void;
 }): Promise<string> {
@@ -36,7 +39,11 @@ export async function runCodex(options: {
       [path.join(webRoot, 'scripts/codex-supervisor.mjs')],
       { env, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] },
     );
-    const args = generatorArguments(options.cwd, options.readOnly);
+    const args = generatorArguments(
+      options.cwd,
+      options.readOnly,
+      options.model,
+    );
     if (options.images?.length)
       args.splice(
         args.length - 1,
@@ -64,6 +71,12 @@ export async function runCodex(options: {
         pending = pending.slice(newline + 1);
         try {
           const event = JSON.parse(line);
+          if (
+            event.type === 'thread.started' &&
+            typeof event.thread_id === 'string' &&
+            /^[0-9a-f-]{36}$/i.test(event.thread_id)
+          )
+            options.onThreadStarted?.(event.thread_id);
           if (
             event.type === 'item.completed' &&
             event.item?.type === 'agent_message'
@@ -109,7 +122,7 @@ export async function runCodex(options: {
       args,
       cwd: options.cwd,
       prompt: options.prompt,
-      timeout: Number(process.env.OPENGAME_JOB_TIMEOUT_MS || 600000),
+      timeout: generationTimeout(options.model),
     });
   });
 }

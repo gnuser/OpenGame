@@ -156,12 +156,15 @@
   align-items: center;
   gap: 7px;
   margin-top: 16px;
+  margin-inline: 4px;
+  min-height: 44px;
   padding: 9px 14px;
   border: 1px solid #c8b6ff42;
   border-radius: 9px;
   background: #b49bff12;
   color: #ece4ff;
   font-size: 12px;
+  text-decoration: none;
 }
 
 .retry:hover {

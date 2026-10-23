@@ -1,7 +1,17 @@
 'use client';
 import Link from 'next/link';
-import { useEffect, useRef, useState } from 'react';
-import { ArrowLeft, Ellipsis, Maximize, Minimize, RotateCcw, ThumbsUp, ThumbsDown, Eye, X } from 'lucide-react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import {
+  ArrowLeft,
+  Ellipsis,
+  Maximize,
+  Minimize,
+  RotateCcw,
+  ThumbsUp,
+  ThumbsDown,
+  Eye,
+  X,
+} from 'lucide-react';
 import { approvalLabel, type GameStats } from '@/shared/types';
 import { AccountMenu } from './access-gate';
 import { GameFrame, GameLoading } from './game-frame';
@@ -52,23 +62,30 @@ export function Player({ projectId }: { projectId: string }) {
       setFullscreenBusy(false);
     }
   }
-  async function engage(action: 'rating' | 'visit', body: unknown): Promise<GameStats> {
-    const response = await fetch(`/api/play/${projectId}/${action}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    const data = await response.json();
-    if (response.status === 401)
-      window.dispatchEvent(new Event('opengame-session-expired'));
-    if (!response.ok) throw new Error(data.error || '暂时无法保存，请重试。');
-    return data;
-  }
+  const engage = useCallback(
+    async (action: 'rating' | 'visit', body: unknown): Promise<GameStats> => {
+      const response = await fetch(`/api/play/${projectId}/${action}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await response.json();
+      if (response.status === 401)
+        window.dispatchEvent(new Event('opengame-session-expired'));
+      if (!response.ok) throw new Error(data.error || '暂时无法保存，请重试。');
+      return data;
+    },
+    [projectId],
+  );
   async function rate(rating: -1 | 1) {
     if (ratingBusy || !stats) return;
     setRatingBusy(true);
     try {
-      setStats(await engage('rating', { rating: stats.myRating === rating ? 0 : rating }));
+      setStats(
+        await engage('rating', {
+          rating: stats.myRating === rating ? 0 : rating,
+        }),
+      );
     } catch (error) {
       setNotice((error as Error).message);
     } finally {
@@ -94,16 +111,27 @@ export function Player({ projectId }: { projectId: string }) {
         setStats(data.stats);
         try {
           const updated = await engage('visit', { visitId });
-          if (active) setStats((current) => current ? { ...current, visits: updated.visits } : updated);
+          if (active)
+            setStats((current) =>
+              current ? { ...current, visits: updated.visits } : updated,
+            );
         } catch (error) {
           if (active) setNotice((error as Error).message);
         }
       })
-      .catch((e) => { if (active) setError(e.message); });
-    return () => { active = false; };
-  }, [projectId]);
+      .catch((e) => {
+        if (active) setError(e.message);
+      });
+    return () => {
+      active = false;
+    };
+  }, [projectId, engage]);
   return (
-    <main className="player-page" ref={playerRef} aria-label={game?.title || '游戏'}>
+    <main
+      className="player-page"
+      ref={playerRef}
+      aria-label={game?.title || '游戏'}
+    >
       {game ? (
         <div className="player-viewport">
           <GameFrame
@@ -132,18 +160,31 @@ export function Player({ projectId }: { projectId: string }) {
       )}
       {game && stats && (
         <section className="game-engagement" aria-label="游戏评价与访问量">
-          <button aria-label="点赞" title="点赞，再次点击取消"
-            aria-pressed={stats.myRating === 1} disabled={ratingBusy}
-            onClick={() => void rate(1)}>
-            <ThumbsUp size={18} /><span>{stats.likes}</span>
+          <button
+            aria-label="点赞"
+            title="点赞，再次点击取消"
+            aria-pressed={stats.myRating === 1}
+            disabled={ratingBusy}
+            onClick={() => void rate(1)}
+          >
+            <ThumbsUp size={18} />
+            <span>{stats.likes}</span>
           </button>
-          <button aria-label="差评" title="差评，再次点击取消"
-            aria-pressed={stats.myRating === -1} disabled={ratingBusy}
-            onClick={() => void rate(-1)}>
-            <ThumbsDown size={18} /><span>{stats.dislikes}</span>
+          <button
+            aria-label="差评"
+            title="差评，再次点击取消"
+            aria-pressed={stats.myRating === -1}
+            disabled={ratingBusy}
+            onClick={() => void rate(-1)}
+          >
+            <ThumbsDown size={18} />
+            <span>{stats.dislikes}</span>
           </button>
           <span aria-live="polite">{approvalLabel(stats)}</span>
-          <span title="游戏页面访问次数"><Eye size={16} />{stats.visits.toLocaleString()} 次访问</span>
+          <span title="游戏页面访问次数">
+            <Eye size={16} />
+            {stats.visits.toLocaleString()} 次访问
+          </span>
         </section>
       )}
       <div className="player-tools">
@@ -196,7 +237,9 @@ export function Player({ projectId }: { projectId: string }) {
               <ArrowLeft size={16} />
               返回首页
             </Link>
-            <Link className="button" href="/marketplace">浏览所有作品</Link>
+            <Link className="button" href="/marketplace">
+              浏览所有作品
+            </Link>
             <div className="player-account">
               <AccountMenu />
             </div>

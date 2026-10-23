@@ -1,6 +1,7 @@
 'use client';
 
 import Link from 'next/link';
+import { startVisiblePolling } from '../client/visible-polling';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   BookOpen,
@@ -392,14 +393,17 @@ export function EvolutionDashboard() {
     try {
       const next = await api<EvolutionOverview>('');
       if (id === sequence.current) setData(next);
+      return next;
     } catch (e) {
       if (id === sequence.current) setError((e as Error).message);
+      throw e;
     }
   }, []);
   useEffect(() => {
-    void load();
+    const requests = sequence;
+    void load().catch(() => {});
     return () => {
-      sequence.current++;
+      requests.current++;
     };
   }, [load]);
   const pending = data?.releases.some(
@@ -407,8 +411,19 @@ export function EvolutionDashboard() {
   );
   useEffect(() => {
     if (!pending) return;
-    const timer = setInterval(() => void load(), 3000);
-    return () => clearInterval(timer);
+    return startVisiblePolling(
+      async () => {
+        const next = await load();
+        return (
+          !next ||
+          next.releases.some(
+            (r) => r.status === 'queued' || r.status === 'running',
+          )
+        );
+      },
+      3000,
+      (e) => setError((e as Error).message),
+    );
   }, [pending, load]);
   async function mutate(action: () => Promise<unknown>, message: string) {
     setBusy(true);

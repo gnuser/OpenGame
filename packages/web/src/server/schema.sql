@@ -1,3 +1,27 @@
+CREATE TABLE IF NOT EXISTS studio_study_courses (
+  id uuid PRIMARY KEY,
+  owner_key text NOT NULL,
+  name text NOT NULL,
+  status text NOT NULL DEFAULT 'queued' CHECK(status IN ('queued','running','ready','failed')),
+  source bytea,
+  deck jsonb,
+  progress jsonb NOT NULL DEFAULT '{}',
+  town jsonb NOT NULL DEFAULT '{"wood":0,"buildings":[]}',
+  error text,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS studio_study_owner ON studio_study_courses(owner_key,created_at);
+ALTER TABLE studio_study_courses ADD COLUMN IF NOT EXISTS adventure jsonb NOT NULL DEFAULT '{}';
+ALTER TABLE studio_study_courses ADD COLUMN IF NOT EXISTS content_hash text;
+ALTER TABLE studio_study_courses ADD COLUMN IF NOT EXISTS import_key uuid;
+CREATE INDEX IF NOT EXISTS studio_study_content ON studio_study_courses(owner_key,content_hash);
+CREATE UNIQUE INDEX IF NOT EXISTS studio_study_import_key ON studio_study_courses(owner_key,import_key) WHERE import_key IS NOT NULL;
+CREATE TABLE IF NOT EXISTS studio_study_answers (
+  course_id uuid NOT NULL REFERENCES studio_study_courses(id) ON DELETE CASCADE,
+  request_key uuid NOT NULL,
+  response jsonb NOT NULL,
+  PRIMARY KEY(course_id,request_key)
+);
 CREATE TABLE IF NOT EXISTS studio_projects (
   id uuid PRIMARY KEY,
   title text NOT NULL,
@@ -187,3 +211,85 @@ CREATE TABLE IF NOT EXISTS studio_game_visits (
   created_at timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (project_id,visit_id)
 );
+
+-- Referral awards are a separate, non-renewing pool of creation credits.
+ALTER TABLE studio_users ADD COLUMN IF NOT EXISTS invited_by uuid REFERENCES studio_users(id);
+ALTER TABLE studio_users ADD COLUMN IF NOT EXISTS invitation_rewarded_at timestamptz;
+ALTER TABLE studio_users ADD COLUMN IF NOT EXISTS bonus_job_credits integer NOT NULL DEFAULT 0 CHECK (bonus_job_credits >= 0);
+CREATE INDEX IF NOT EXISTS studio_users_invited_by ON studio_users(invited_by);
+ALTER TABLE studio_jobs ADD COLUMN IF NOT EXISTS uses_bonus boolean NOT NULL DEFAULT false;
+
+-- Identity stays separate from project ownership and invitation credentials.
+ALTER TABLE studio_users ALTER COLUMN access_hash DROP NOT NULL;
+CREATE TABLE IF NOT EXISTS studio_identities (
+  provider text NOT NULL,
+  app_id text NOT NULL,
+  subject text NOT NULL,
+  user_id uuid NOT NULL REFERENCES studio_users(id),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (provider, app_id, subject),
+  UNIQUE (provider, app_id, user_id)
+);
+
+ALTER TABLE studio_jobs ADD COLUMN IF NOT EXISTS model text NOT NULL DEFAULT 'default' CHECK (model IN ('default','gpt-6-astra'));
+
+-- Purchased credits are separate from invitation awards and basic quotas.
+ALTER TABLE studio_users ADD COLUMN IF NOT EXISTS paid_job_credits integer NOT NULL DEFAULT 0;
+ALTER TABLE studio_jobs ADD COLUMN IF NOT EXISTS uses_paid boolean NOT NULL DEFAULT false;
+CREATE TABLE IF NOT EXISTS studio_credit_orders (
+  id uuid PRIMARY KEY,
+  owner_id uuid NOT NULL REFERENCES studio_users(id),
+  environment text NOT NULL CHECK (environment IN ('sandbox','live')),
+  pack_id text NOT NULL,
+  credits integer NOT NULL CHECK (credits > 0),
+  amount_minor integer NOT NULL CHECK (amount_minor > 0),
+  merchant_id text NOT NULL,
+  provider_id text UNIQUE,
+  capture_id text UNIQUE,
+  capture_request_id uuid NOT NULL UNIQUE,
+  approval_url text,
+  status text NOT NULL DEFAULT 'CREATING',
+  granted boolean NOT NULL DEFAULT false,
+  revoked boolean NOT NULL DEFAULT false,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS studio_credit_orders_owner ON studio_credit_orders(owner_id,created_at DESC);
+CREATE TABLE IF NOT EXISTS studio_credit_events (
+  environment text NOT NULL,
+  id text NOT NULL,
+  order_id uuid NOT NULL REFERENCES studio_credit_orders(id),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY(environment,id)
+);
+CREATE TABLE IF NOT EXISTS studio_credit_ledger (
+  order_id uuid NOT NULL REFERENCES studio_credit_orders(id),
+  kind text NOT NULL CHECK (kind IN ('purchase','revoke')),
+  delta integer NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY(order_id,kind)
+);
+
+-- Image projects use the same ownership, conversations and immutable versions.
+ALTER TABLE studio_projects ADD COLUMN IF NOT EXISTS media_kind text NOT NULL DEFAULT 'game' CHECK(media_kind IN ('game','image'));
+CREATE TABLE IF NOT EXISTS studio_image_assets (
+ id uuid PRIMARY KEY, project_id uuid NOT NULL REFERENCES studio_projects(id),
+ name text NOT NULL, data bytea NOT NULL, created_at timestamptz NOT NULL DEFAULT now()
+);
+ALTER TABLE studio_jobs ADD COLUMN IF NOT EXISTS image_asset_id uuid REFERENCES studio_image_assets(id);
+
+CREATE TABLE IF NOT EXISTS studio_image_batches (
+ id uuid PRIMARY KEY, project_id uuid NOT NULL REFERENCES studio_projects(id),
+ base_version_id uuid REFERENCES studio_versions(id), request_key uuid NOT NULL UNIQUE, request_hash text NOT NULL,
+ prompt text NOT NULL, styles jsonb NOT NULL, request_keys jsonb NOT NULL, model text NOT NULL,
+ canvas_snapshot jsonb, status text NOT NULL DEFAULT 'active' CHECK(status IN ('active','completed','cancelled','failed')),
+ error text, created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS studio_one_active_image_batch ON studio_image_batches(project_id) WHERE status='active';
+ALTER TABLE studio_jobs ADD COLUMN IF NOT EXISTS image_batch_id uuid REFERENCES studio_image_batches(id);
+ALTER TABLE studio_jobs ADD COLUMN IF NOT EXISTS image_batch_index integer;
+ALTER TABLE studio_jobs ADD COLUMN IF NOT EXISTS image_reference_version_id uuid REFERENCES studio_versions(id);
+CREATE UNIQUE INDEX IF NOT EXISTS studio_image_batch_item ON studio_jobs(image_batch_id,image_batch_index);
+
+ALTER TABLE studio_image_batches ADD COLUMN IF NOT EXISTS grouped boolean NOT NULL DEFAULT false;
+ALTER TABLE studio_image_batches ADD COLUMN IF NOT EXISTS result_version_id uuid REFERENCES studio_versions(id);

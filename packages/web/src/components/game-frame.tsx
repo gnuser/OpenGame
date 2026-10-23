@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { Gamepad2, RotateCcw } from 'lucide-react';
+import { ExternalLink, Gamepad2, RotateCcw } from 'lucide-react';
 import styles from './game-frame.module.css';
 
 export function GameLoading({
@@ -9,11 +9,13 @@ export function GameLoading({
   slow = false,
   leaving = false,
   onRetry,
+  standaloneUrl,
 }: {
   title?: string;
   slow?: boolean;
   leaving?: boolean;
   onRetry?: () => void;
+  standaloneUrl?: string;
 }) {
   return (
     <div
@@ -40,7 +42,7 @@ export function GameLoading({
           </div>
           <p className={styles.hint}>
             {slow
-              ? '加载比平时久，可以稍等片刻或重新加载。'
+              ? '加载比平时久，可以重新加载，或单独打开游戏。'
               : '准备好后，游戏会自动出现'}
           </p>
         </div>
@@ -49,6 +51,17 @@ export function GameLoading({
             <RotateCcw size={15} />
             重新加载
           </button>
+        )}
+        {slow && standaloneUrl && !leaving && (
+          <a
+            className={styles.retry}
+            href={standaloneUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            <ExternalLink size={15} />
+            单独打开游戏
+          </a>
         )}
       </div>
       <span className={styles.signature} aria-hidden="true">
@@ -83,7 +96,6 @@ function LoadingGameFrame({
     'loading',
   );
   const [slow, setSlow] = useState(false);
-  const paint = useRef<number>(0);
   const fade = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   useEffect(() => {
@@ -94,24 +106,18 @@ function LoadingGameFrame({
 
   useEffect(
     () => () => {
-      cancelAnimationFrame(paint.current);
       clearTimeout(fade.current);
     },
     [],
   );
 
   function reveal() {
-    cancelAnimationFrame(paint.current);
     clearTimeout(fade.current);
-    // The generated games start from a synchronous script. The frame's load
-    // event waits for that script and its resources; two paints avoid exposing
-    // the empty frame while its first game screen is being composited.
-    paint.current = requestAnimationFrame(() => {
-      paint.current = requestAnimationFrame(() => {
-        setPhase('leaving');
-        fade.current = setTimeout(() => setPhase('ready'), 200);
-      });
-    });
+    // load already waits for the game's synchronous startup and resources.
+    // Never gate access on animation frames: embedded/background browsers may
+    // suspend them even after the game has finished loading.
+    setPhase('leaving');
+    fade.current = setTimeout(() => setPhase('ready'), 200);
   }
 
   return (
@@ -134,6 +140,7 @@ function LoadingGameFrame({
           slow={slow}
           leaving={phase === 'leaving'}
           onRetry={onRetry}
+          standaloneUrl={src}
         />
       )}
     </div>

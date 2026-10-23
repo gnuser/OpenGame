@@ -64,8 +64,8 @@ export const canvasDocumentSchema = z
       )
         issue('引用必须指向画布中其他节点，且不能重复。');
     }
-    const visiting = new Set<string>(),
-      visited = new Set<string>();
+    const visiting = new Set<string>();
+    const visited = new Set<string>();
     const visit = (nodeId: string): boolean => {
       if (visiting.has(nodeId)) return false;
       if (visited.has(nodeId)) return true;
@@ -154,14 +154,14 @@ export function mergeCanvasDocument(
   const equal = (a: unknown, b: unknown) => canvasJson(a) === canvasJson(b);
   const merge = <T>(a: T, b: T, c: T): T | undefined =>
     equal(b, c) || equal(a, c) ? b : equal(a, b) ? c : undefined;
-  const nodes: CanvasNode[] = [],
-    layout: CanvasDocument['layout'] = {};
+  const nodes: CanvasNode[] = [];
+  const layout: CanvasDocument['layout'] = {};
   for (const nodeId of new Set(
     [...local.nodes, ...remote.nodes].map((n) => n.id),
   )) {
-    const before = base.nodes.find((n) => n.id === nodeId),
-      ours = local.nodes.find((n) => n.id === nodeId),
-      theirs = remote.nodes.find((n) => n.id === nodeId);
+    const before = base.nodes.find((n) => n.id === nodeId);
+    const ours = local.nodes.find((n) => n.id === nodeId);
+    const theirs = remote.nodes.find((n) => n.id === nodeId);
     if (before && (!ours || !theirs)) {
       const survivor = ours || theirs;
       if (
@@ -181,9 +181,9 @@ export function mergeCanvasDocument(
     if (before.type !== ours.type || ours.type !== theirs.type) return;
     const data: Record<string, unknown> = {};
     for (const key of Object.keys(ours)) {
-      const a = (before as Record<string, unknown>)[key],
-        b = (ours as Record<string, unknown>)[key],
-        c = (theirs as Record<string, unknown>)[key];
+      const a = (before as Record<string, unknown>)[key];
+      const b = (ours as Record<string, unknown>)[key];
+      const c = (theirs as Record<string, unknown>)[key];
       if (!equal(a, b) && !equal(a, c) && !equal(b, c)) return;
       data[key] = merge(a, b, c);
     }

@@ -2667,3 +2667,173 @@ dialog::backdrop {
     flex-wrap: wrap;
   }
 }
+
+.quota-trigger {
+  display: grid;
+  gap: 3px;
+  border: 1px solid #ddd8f3;
+  border-radius: 10px;
+  padding: 7px 12px;
+  background: #f7f5ff;
+  color: #51418a;
+  font: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.quota-trigger span {
+  font-size: 11px;
+  color: #72658d;
+}
+.quota-dialog {
+  width: min(520px, calc(100vw - 32px));
+  max-height: calc(100dvh - 40px);
+  overflow: auto;
+  border: 1px solid #e7e1f0;
+  border-radius: 20px;
+  padding: 24px;
+  color: #302a40;
+  background: #fff;
+}
+.quota-dialog::backdrop {
+  background: rgb(25 18 45 / 40%);
+}
+.quota-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.quota-heading h2 {
+  margin: 0;
+}
+.quota-dialog p {
+  line-height: 1.65;
+  color: #71687f;
+}
+.quota-total strong {
+  font-size: 32px;
+  color: #7254c7;
+}
+.quota-breakdown {
+  display: grid;
+  gap: 10px;
+  padding: 16px;
+  border-radius: 12px;
+  background: #f7f5fb;
+}
+.quota-breakdown div {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+}
+.quota-breakdown dd {
+  margin: 0;
+  font-weight: 600;
+}
+.quota-dialog form,
+.quota-invitation {
+  display: grid;
+  gap: 12px;
+  margin-top: 20px;
+}
+.quota-dialog input {
+  min-width: 0;
+  width: 100%;
+  padding: 12px;
+  border: 1px solid #ddd6e9;
+  border-radius: 8px;
+  font: inherit;
+}
+.quota-invitation {
+  padding: 16px;
+  background: #f7f5fb;
+  border-radius: 12px;
+}
+
+.auth-buttons {
+  display: grid;
+  gap: 12px;
+  margin: 18px 0;
+}
+.auth-buttons .button {
+  justify-content: center;
+}
+.legacy-login {
+  margin: 20px 0;
+}
+.legacy-login summary,
+.account-link summary {
+  cursor: pointer;
+}
+.legacy-login form {
+  margin-top: 16px;
+}
+.account-link {
+  position: relative;
+}
+.account-link .auth-buttons {
+  position: absolute;
+  z-index: 30;
+  right: 0;
+  width: min(320px, 85vw);
+  padding: 18px;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  box-shadow: 0 12px 40px #0008;
+}
+
+.invite-card > a {
+  display: block;
+  margin-bottom: 12px;
+}
+
+.credit-shop {
+  margin-top: 24px;
+  border-top: 1px solid #d9dee6;
+  padding-top: 16px;
+}
+.credit-packs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.credit-packs button {
+  display: grid;
+  gap: 4px;
+  text-align: left;
+}
+.credit-orders {
+  list-style: none;
+  padding: 0;
+  display: grid;
+  gap: 12px;
+}
+.credit-orders li {
+  padding: 12px;
+  border: 1px solid #d9dee6;
+  border-radius: 10px;
+}
+.credit-orders li > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+}
+.credit-orders small {
+  display: block;
+  overflow-wrap: anywhere;
+  margin: 8px 0;
+}
+
+.credit-invitation-heading {
+  margin-top: 24px;
+}
+.credit-shop details {
+  margin-top: 12px;
+}
+.credit-shop summary {
+  cursor: pointer;
+}

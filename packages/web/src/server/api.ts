@@ -1,3 +1,20 @@
+import {
+  listStudy,
+  uploadStudy,
+  answerStudy,
+  buildStudy,
+  adventureStudy,
+} from './study';
+import { createImageBatch, cancelImageBatch } from './image-batch';
+import { uploadImageAsset, artworkPreview } from './image-project';
+import {
+  paymentAccount,
+  createCreditOrder,
+  creditOrder,
+  creditWebhook,
+} from './payments';
+import { privySession } from './privy-access';
+import { accountQuota, createReferral } from './referrals';
 import { gameStats, recordEngagement } from './engagement';
 import { z } from 'zod';
 import { readFile } from 'node:fs/promises';
@@ -10,6 +27,8 @@ import {
   dataRoot,
   webRoot,
   accessMode,
+  authProvider,
+  privyAppId,
 } from './config';
 import { pool, migrate } from './db';
 import {
@@ -50,12 +69,16 @@ import {
   sessionViewer,
 } from './access';
 
+import { generationModels } from '../shared/models';
+
 const uuid = z.string().uuid();
 const submission = z
   .object({
     prompt: z.string().trim().min(1, '请描述你的想法。').max(8000),
     kind: z.enum(['chat', 'build']).optional(),
+    imageAssetId: uuid.optional(),
     sourcePlanId: uuid.optional(),
+    model: z.enum(generationModels).optional(),
     requestKey: uuid,
     baseVersionId: uuid.nullable().optional(),
     canvas: canvasSelectionSchema.optional(),
@@ -107,6 +130,16 @@ export async function dispatch(
   route: string[],
 ): Promise<Response> {
   try {
+    // Provider notifications have no browser session/Origin; only this exact route
+    // bypasses browser CSRF checks and still requires PayPal signature verification.
+    if (route.join('/') === 'payments/webhook' && request.method === 'POST') {
+      if (request.headers.get('host') !== new URL(appOrigin).host)
+        throw new StudioError('请求地址无效。', 403);
+      return Response.json(
+        await creditWebhook(request, await body(request, 262144)),
+        { headers: { 'Cache-Control': 'no-store' } },
+      );
+    }
     assertLocalRequest(request);
     const [resource, id, action] = route;
     const method = request.method;
@@ -117,7 +150,24 @@ export async function dispatch(
         return Response.json(
           {
             mode: accessMode,
-            user: viewer ? { id: viewer.id, label: viewer.label } : null,
+            auth: {
+              provider: authProvider,
+              appId: authProvider === 'privy' ? privyAppId : null,
+            },
+            user: viewer
+              ? {
+                  id: viewer.id,
+                  label: viewer.label,
+                  linked:
+                    authProvider === 'privy' &&
+                    !!(
+                      await pool().query(
+                        "SELECT 1 FROM studio_identities WHERE provider='privy' AND app_id=$1 AND user_id=$2",
+                        [privyAppId, viewer.id],
+                      )
+                    ).rowCount,
+                }
+              : null,
           },
           { headers: privateHeaders },
         );
@@ -136,17 +186,109 @@ export async function dispatch(
         );
       }
     }
-    const viewer = await requireViewer(request);
-    const ownerId = viewer?.id;
-    if (resource === 'logout' && !id && method === 'POST') {
+    if (
+      resource === 'session' &&
+      id === 'privy' &&
+      route.length === 2 &&
+      method === 'POST'
+    ) {
+      const input = z
+        .object({
+          token: z.string().min(1).max(16000),
+          action: z.enum(['login', 'link']),
+          userId: uuid.optional(),
+        })
+        .strict()
+        .parse(await body(request));
+      const current = await sessionViewer(request);
+      if (input.action === 'link' && (!current || input.userId !== current.id))
+        throw new StudioError('账号状态已改变，请从原账号重新发起绑定。', 401);
+      const token = await privySession(input.token, input.action, current);
+      return Response.json(
+        { ok: true },
+        {
+          headers: { ...privateHeaders, 'Set-Cookie': sessionCookie(token) },
+        },
+      );
+    }
+    // Logout is idempotent, including when the current session has expired.
+    if (resource === 'logout' && route.length === 1 && method === 'POST') {
       await logout(request);
       return Response.json(
         { ok: true },
-        { headers: { ...privateHeaders, 'Set-Cookie': sessionCookie('', 0) } },
+        {
+          headers: { ...privateHeaders, 'Set-Cookie': sessionCookie('', 0) },
+        },
       );
     }
+    const viewer = await requireViewer(request);
+    const ownerId = viewer?.id;
     let result: unknown;
-    if (resource === 'evolution') {
+    if (resource === 'study') {
+      if (route.length === 1 && method === 'GET')
+        result = await listStudy(ownerId);
+      else if (route.length === 1 && method === 'POST')
+        result = await uploadStudy(ownerId, await body(request, 8_100_000));
+      else if (route.length === 3 && action === 'answers' && method === 'POST')
+        result = await answerStudy(
+          ownerId,
+          uuid.parse(id),
+          await body(request),
+        );
+      else if (route.length === 3 && action === 'build' && method === 'POST')
+        result = await buildStudy(ownerId, uuid.parse(id), await body(request));
+      else if (
+        route.length === 3 &&
+        action === 'adventure' &&
+        method === 'POST'
+      )
+        result = await adventureStudy(
+          ownerId,
+          uuid.parse(id),
+          await body(request),
+        );
+      else throw new StudioError('找不到这个学习入口。', 404);
+    } else if (resource === 'payments') {
+      if (!ownerId) throw new StudioError('请登录后购买额度。', 401);
+      if (route.length === 1 && method === 'GET')
+        result = await paymentAccount(ownerId);
+      else if (id === 'orders' && route.length === 2 && method === 'POST')
+        result = await createCreditOrder(ownerId, await body(request));
+      else if (
+        id === 'orders' &&
+        action &&
+        route.length === 3 &&
+        method === 'GET'
+      )
+        result = await creditOrder(ownerId, action);
+      else if (
+        id === 'orders' &&
+        action &&
+        route.length === 4 &&
+        route[3] === 'capture' &&
+        method === 'POST'
+      )
+        result = await creditOrder(ownerId, action, true);
+      else throw new StudioError('找不到这个支付入口。', 404);
+    } else if (
+      resource === 'account' &&
+      route.length === 1 &&
+      method === 'GET'
+    ) {
+      if (!ownerId) throw new StudioError('本机模式不限制作次数。', 400);
+      result = await accountQuota(ownerId);
+    } else if (
+      resource === 'invitations' &&
+      route.length === 1 &&
+      method === 'POST'
+    ) {
+      if (!ownerId) throw new StudioError('本机模式不需要邀请码。', 400);
+      const input = z
+        .object({ label: z.string().trim().min(1).max(80) })
+        .strict()
+        .parse(await body(request));
+      result = await createReferral(ownerId, input.label);
+    } else if (resource === 'evolution') {
       if (!id && method === 'GET') result = await evolutionOverview(viewer);
       else if (id === 'candidates' && !action && method === 'POST')
         result = await submitCandidate(viewer, await body(request));
@@ -163,12 +305,19 @@ export async function dispatch(
       else if (id === 'activate' && !action && method === 'POST')
         result = await activateKnowledgeRelease(viewer, await body(request));
       else throw new StudioError('找不到这个能力升级操作。', 404);
-    } else if (resource === 'marketplace' && route.length === 1 && method === 'GET')
+    } else if (
+      resource === 'marketplace' &&
+      route.length === 1 &&
+      method === 'GET'
+    )
       result = {
         projects: (await listMarketplaceProjects()).map((project) => ({
           ...project,
-          previewUrl: gameUrl(project.released_version_id!, viewer, 'released')
-            .replace(/index\.html$/, 'preview.png'),
+          previewUrl: gameUrl(
+            project.released_version_id!,
+            viewer,
+            'released',
+          ).replace(/index\.html$/, 'preview.png'),
         })),
         previewOrigin,
       };
@@ -195,13 +344,97 @@ export async function dispatch(
       method === 'POST'
     ) {
       const input = z
-        .object({ requestKey: uuid })
+        .object({
+          requestKey: uuid,
+          mediaKind: z.enum(['game', 'image']).default('game'),
+        })
         .strict()
         .parse(await body(request));
-      result = await createDraftProject(input.requestKey, ownerId);
+      result = await createDraftProject(
+        input.requestKey,
+        ownerId,
+        input.mediaKind,
+      );
     } else if (resource === 'projects' && id) {
       uuid.parse(id);
-      if (action === 'canvas') {
+      if (
+        (action === 'image-download' || action === 'image-preview') &&
+        route.length === 3 &&
+        method === 'GET'
+      ) {
+        const versionId = uuid.parse(
+          new URL(request.url).searchParams.get('versionId'),
+        );
+        const detail = await getProject(id, ownerId);
+        const version = detail.versions.find((v) => v.id === versionId);
+        if (detail.project.media_kind !== 'image' || !version)
+          throw new StudioError('找不到图片版本。', 404);
+        const item = z.coerce
+          .number()
+          .int()
+          .min(0)
+          .max(5)
+          .parse(new URL(request.url).searchParams.get('item') || '0');
+        const imageFile =
+          version.validation.images?.[item]?.file ||
+          (item === 0 && !version.validation.images ? 'artwork.png' : null);
+        if (!imageFile || !/^artwork(?:-[2-6])?\.png$/.test(imageFile))
+          throw new StudioError('找不到这张图片。', 404);
+        if (action === 'image-preview') {
+          const preview = await artworkPreview(
+            await readFile(
+              path.join(artifactDir(version.artifact_key), imageFile),
+            ),
+          );
+          return new Response(new Uint8Array(preview), {
+            headers: {
+              'Content-Type': 'image/webp',
+              'Cache-Control': 'private, no-store',
+              'X-Content-Type-Options': 'nosniff',
+            },
+          });
+        }
+        return new Response(
+          new Uint8Array(
+            await readFile(
+              path.join(artifactDir(version.artifact_key), imageFile),
+            ),
+          ),
+          {
+            headers: {
+              'Content-Type': 'image/png',
+              'Content-Disposition': `attachment; filename="artwork-v${version.number}-${item + 1}.png"`,
+              'Cache-Control': 'private, no-store',
+              'X-Content-Type-Options': 'nosniff',
+            },
+          },
+        );
+      } else if (
+        action === 'image-batches' &&
+        method === 'POST' &&
+        route.length === 3
+      ) {
+        result = await createImageBatch(id, ownerId, await body(request));
+      } else if (
+        action === 'image-batches' &&
+        method === 'POST' &&
+        route.length === 5 &&
+        route[4] === 'cancel'
+      ) {
+        await cancelImageBatch(id, uuid.parse(route[3]), ownerId);
+        result = { ok: true };
+      } else if (
+        action === 'image-assets' &&
+        route.length === 3 &&
+        method === 'POST'
+      ) {
+        await getProject(id, ownerId);
+        result = await uploadImageAsset(
+          id,
+          ownerId,
+          await body(request, 16_100_000),
+        );
+      } else if (action === 'canvas') {
         if (route.length === 3 && method === 'GET') {
           const version = new URL(request.url).searchParams.get('versionId');
           if (version) uuid.parse(version);
@@ -356,14 +589,33 @@ export async function dispatch(
         ),
         observations: count.rows[0].count,
       };
-    } else if (resource === 'play' && id && route.length === 3 &&
-      (action === 'rating' || action === 'visit') && method === 'POST') {
+    } else if (
+      resource === 'play' &&
+      id &&
+      route.length === 3 &&
+      (action === 'rating' || action === 'visit') &&
+      method === 'POST'
+    ) {
       uuid.parse(id);
-      const input = action === 'rating'
-        ? z.object({ rating: z.union([z.literal(-1), z.literal(0), z.literal(1)]) }).strict().parse(await body(request))
-        : z.object({ visitId: uuid }).strict().parse(await body(request));
+      const input =
+        action === 'rating'
+          ? z
+              .object({
+                rating: z.union([z.literal(-1), z.literal(0), z.literal(1)]),
+              })
+              .strict()
+              .parse(await body(request))
+          : z
+              .object({ visitId: uuid })
+              .strict()
+              .parse(await body(request));
       result = await recordEngagement(id, viewer?.id || 'local', input);
-    } else if (resource === 'play' && id && route.length === 2 && method === 'GET') {
+    } else if (
+      resource === 'play' &&
+      id &&
+      route.length === 2 &&
+      method === 'GET'
+    ) {
       uuid.parse(id);
       const { project, versions } = await getProject(id);
       const version = versions.find(

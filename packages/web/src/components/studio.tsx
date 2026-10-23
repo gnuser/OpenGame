@@ -1,6 +1,9 @@
 'use client';
 
 import Link from 'next/link';
+import { ImageBatchPanel } from './image-batch-panel';
+import { ImageVersionGallery } from './image-version-gallery';
+import { startVisiblePolling } from '../client/visible-polling';
 import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
@@ -55,6 +58,12 @@ async function api<T>(url: string, body?: unknown): Promise<T> {
         },
   );
   const value = await response.json();
+  if (
+    response.ok &&
+    body !== undefined &&
+    (url === '/api/projects' || /\/jobs$/.test(url))
+  )
+    window.dispatchEvent(new Event('opengame-quota-changed'));
   if (response.status === 401)
     window.dispatchEvent(new Event('opengame-session-expired'));
   if (!response.ok) throw new Error(value.error || '操作未完成，请重试。');
@@ -80,10 +89,15 @@ export function Studio({
   const router = useRouter();
   const session = useSession();
   const draftKey = `opengame-draft-${session.user ? `${session.user.id}-` : ''}${projectId || 'new'}`;
+  const [creationKind, setCreationKind] = useState<'game' | 'image'>('game');
   const [projects, setProjects] = useState<Project[]>([]);
   const [detail, setDetail] = useState<ProjectDetail>();
+  const imageProject = projectId
+    ? detail?.project.media_kind === 'image'
+    : creationKind === 'image';
   const [previewOrigin, setPreviewOrigin] = useState('');
   const [prompt, setPrompt] = useState('');
+  const [model, setModel] = useState<'default' | 'gpt-6-astra'>('default');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [ready, setReady] = useState(false);
@@ -119,13 +133,42 @@ export function Studio({
   const draftRequest = useRef<string | null>(null);
   const dialog = useRef<HTMLDialogElement>(null);
   const scroll = useRef<HTMLDivElement>(null);
+  const initializedModelProject = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (detail && initializedModelProject.current !== detail.project.id) {
+      initializedModelProject.current = detail.project.id;
+      setModel(detail.jobs[0]?.model || 'default');
+    }
+  }, [detail]);
   const latestJob = detail?.jobs[0];
-  const running =
+  const jobRunning =
     latestJob?.status === 'queued' || latestJob?.status === 'running';
+  const activeBatch = detail?.imageBatches?.find((b) => b.status === 'active');
+  const pendingGallery = detail?.imageBatches?.some(
+    (b) =>
+      b.grouped &&
+      !b.result_version_id &&
+      detail.jobs.some(
+        (j) =>
+          j.image_batch_id === b.id &&
+          j.status === 'succeeded' &&
+          !j.result_version_id,
+      ),
+  );
+  const running = jobRunning || !!activeBatch || !!pendingGallery;
   const currentVersion = detail?.versions.find(
     (v) => v.id === (selectedVersion || detail.project.latest_version_id),
   );
 
+  const refreshDetail = useCallback(async () => {
+    if (!projectId) return;
+    const next = await api<ProjectDetail>(`/api/projects/${projectId}`);
+    setDetail(next);
+    setProjects((list) =>
+      list.map((p) => (p.id === next.project.id ? next.project : p)),
+    );
+    return next;
+  }, [projectId]);
   const refresh = useCallback(async () => {
     const [list, status] = await Promise.all([
       api<{ projects: Project[]; previewOrigin: string }>('/api/projects'),
@@ -136,24 +179,38 @@ export function Studio({
     setReady(status.workerReady && status.runtimeReady);
     setConversationReady(status.workerReady);
     setRuntimeReady(status.runtimeReady);
-    if (projectId)
-      setDetail(await api<ProjectDetail>(`/api/projects/${projectId}`));
-  }, [projectId]);
+    await refreshDetail();
+  }, [refreshDetail]);
   useEffect(() => {
-    let live = true;
-    const poll = () => {
-      if (live)
-        void refresh().catch((e) => {
-          if (live) setError(e.message);
-        });
-    };
-    poll();
-    const timer = setInterval(poll, 2000);
-    return () => {
-      live = false;
-      clearInterval(timer);
-    };
+    void refresh().catch((e) => setError(e.message));
   }, [refresh]);
+  useEffect(() => {
+    if (!running) return;
+    return startVisiblePolling(
+      async () => {
+        const next = await refreshDetail();
+        const status = next?.jobs[0]?.status;
+        return (
+          status === 'queued' ||
+          status === 'running' ||
+          !!next?.imageBatches?.some(
+            (b) =>
+              b.status === 'active' ||
+              (b.grouped &&
+                !b.result_version_id &&
+                next.jobs.some(
+                  (j) =>
+                    j.image_batch_id === b.id &&
+                    j.status === 'succeeded' &&
+                    !j.result_version_id,
+                )),
+          )
+        );
+      },
+      2000,
+      (e) => setError((e as Error).message),
+    );
+  }, [running, refreshDetail]);
   useEffect(() => {
     setSelectedVersion(undefined);
     setDetail(undefined);
@@ -180,6 +237,36 @@ export function Studio({
   }
   async function submit() {
     if (!prompt.trim() || busy || running) return;
+    if (!projectId && imageProject) {
+      setBusy(true);
+      setError('');
+      try {
+        draftRequest.current ||= crypto.randomUUID();
+        const created = await api<{ projectId: string }>(
+          '/api/projects/drafts',
+          { requestKey: draftRequest.current, mediaKind: 'image' },
+        );
+        if (request.current?.content !== prompt.trim())
+          request.current = {
+            content: prompt.trim(),
+            key: crypto.randomUUID(),
+          };
+        await api(`/api/projects/${created.projectId}/jobs`, {
+          kind: 'chat',
+          prompt: prompt.trim(),
+          model,
+          requestKey: request.current.key,
+        });
+        draft('');
+        request.current = null;
+        router.push(`/projects/${created.projectId}`);
+      } catch (e) {
+        setError((e as Error).message);
+      } finally {
+        setBusy(false);
+      }
+      return;
+    }
     setBusy(true);
     setError('');
     try {
@@ -192,6 +279,7 @@ export function Studio({
         projectId,
         detail?.project.latest_version_id,
         prompt.trim(),
+        model,
         selection,
       ]);
       if (request.current?.content !== content)
@@ -201,6 +289,7 @@ export function Studio({
         {
           prompt: prompt.trim(),
           kind: 'chat',
+          model,
           requestKey: request.current.key,
           ...(selection ? { canvas: selection } : {}),
           ...(projectId
@@ -211,7 +300,7 @@ export function Studio({
       draft('');
       request.current = null;
       setSelectedVersion(undefined);
-      if (projectId) await refresh();
+      if (projectId) await refreshDetail();
       else router.push(`/projects/${result.projectId}`);
     } catch (e) {
       setError((e as Error).message);
@@ -227,6 +316,7 @@ export function Studio({
       draftRequest.current ||= crypto.randomUUID();
       const created = await api<{ projectId: string }>('/api/projects/drafts', {
         requestKey: draftRequest.current,
+        mediaKind: creationKind,
       });
       if (prompt.trim())
         localStorage.setItem(
@@ -240,16 +330,66 @@ export function Studio({
       setBusy(false);
     }
   }
+  async function importArtwork(file: File) {
+    if (!projectId || busy || running) return;
+    setBusy(true);
+    setError('');
+    try {
+      if (file.size > 12_000_000) throw new Error('图片不能超过 12 MB。');
+      const data = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result).split(',')[1]);
+        reader.onerror = () => reject(new Error('无法读取图片。'));
+        reader.readAsDataURL(file);
+      });
+      const asset = await api<{ id: string }>(
+        `/api/projects/${projectId}/image-assets`,
+        { name: file.name.slice(0, 80), data },
+      );
+      await api(`/api/projects/${projectId}/jobs`, {
+        kind: 'build',
+        imageAssetId: asset.id,
+        prompt: prompt.trim() || `导入图片：${file.name.slice(0, 80)}`,
+        requestKey: crypto.randomUUID(),
+        baseVersionId: detail?.project.latest_version_id || null,
+      });
+      draft('');
+      setSelectedVersion(undefined);
+      await refreshDetail();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function downloadArtwork() {
+    if (!projectId || !currentVersion) return;
+    try {
+      const response = await fetch(
+        `/api/projects/${projectId}/image-download?versionId=${currentVersion.id}`,
+      );
+      if (!response.ok) throw new Error('下载失败，请刷新后重试。');
+      const url = URL.createObjectURL(await response.blob());
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `artwork-v${String(currentVersion.number).padStart(3, '0')}.png`;
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  }
   async function startPlan(job: Job) {
     if (busy || running || !projectId) return;
     await action(async () => {
-      const content = `start-plan:${job.id}`;
+      const content = `start-plan:${job.id}:${model}`;
       if (request.current?.content !== content)
         request.current = { content, key: crypto.randomUUID() };
       await api(`/api/projects/${projectId}/jobs`, {
         prompt: '按这份方案开始制作。',
         kind: 'build',
         sourcePlanId: job.id,
+        model,
         baseVersionId: detail?.project.latest_version_id || null,
         requestKey: request.current.key,
       });
@@ -279,7 +419,7 @@ export function Studio({
     setError('');
     try {
       await fn();
-      await refresh();
+      await refreshDetail();
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -290,7 +430,9 @@ export function Studio({
     if (
       canvas.current?.hasChanges() &&
       !window.confirm(
-        '恢复版本会替换当前未保存的设计草稿。确定恢复这个游戏及其当时的画布吗？',
+        imageProject
+          ? '切换版本会替换当前未保存的参考画布。确定设为当前版本吗？'
+          : '恢复版本会替换当前未保存的设计草稿。确定恢复这个游戏及其当时的画布吗？',
       )
     )
       return;
@@ -304,7 +446,11 @@ export function Studio({
       await canvas.current.reload();
       setSelectedVersion(undefined);
       setModal(null);
-      setToast('已恢复为新版本，原有历史完整保留。');
+      setToast(
+        imageProject
+          ? '已设为当前版本，全部历史保留。'
+          : '已恢复为新版本，原有历史完整保留。',
+      );
     });
   }
   async function publish() {
@@ -400,7 +546,11 @@ export function Studio({
         </div>
       )}
       <label className="sr-only" htmlFor="prompt">
-        {projectId ? '聊想法或描述想修改的地方' : '描述你想制作的游戏'}
+        {imageProject
+          ? '描述画面或记录修改要求'
+          : projectId
+            ? '聊想法或描述想修改的地方'
+            : '描述你想制作的游戏'}
       </label>
       <textarea
         id="prompt"
@@ -408,9 +558,11 @@ export function Studio({
         maxLength={8000}
         onChange={(e) => draft(e.target.value)}
         placeholder={
-          projectId
-            ? '聊聊玩法，或直接告诉我这次要改什么…'
-            : '描述一个你想玩的游戏，玩法可以天马行空…'
+          imageProject
+            ? '描述构图、画风、光线，或记录这个图片版本的修改要求…'
+            : projectId
+              ? '聊聊玩法，或直接告诉我这次要改什么…'
+              : '描述一个你想玩的游戏，玩法可以天马行空…'
         }
         onKeyDown={(e) => {
           if (
@@ -423,6 +575,29 @@ export function Studio({
           }
         }}
       />
+      <label
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8,
+          padding: '4px 12px',
+          fontSize: 13,
+        }}
+      >
+        制作模型
+        <select
+          aria-label="制作模型"
+          value={model}
+          disabled={busy || !!running}
+          style={{ minHeight: 44, maxWidth: '100%' }}
+          onChange={(e) =>
+            setModel(e.target.value as 'default' | 'gpt-6-astra')
+          }
+        >
+          <option value="gpt-6-astra">GPT-6 Astra</option>
+          <option value="default">平台默认</option>
+        </select>
+      </label>
       <div className="composer-footer">
         <span>
           {running
@@ -469,7 +644,8 @@ export function Studio({
           >
             我的作品
           </Link>
-<Link href="/marketplace">作品广场</Link>
+          <Link href="/marketplace">作品广场</Link>
+          <Link href="/study">学习小镇</Link>
           <button onClick={() => void showStandards()}>制作规范</button>
           <Link href="/knowledge">知识库</Link>
         </nav>
@@ -507,12 +683,12 @@ export function Studio({
             </span>
             <h1>
               {view === 'library' ? (
-                '你的游戏，都在这里。'
+                '你的作品，都在这里。'
               ) : (
                 <>
-                  把脑海里的玩法，
+                  {imageProject ? '把脑海里的画面，' : '把脑海里的玩法，'}
                   <br className="mobile-break" />
-                  变成能玩的游戏。
+                  {imageProject ? '保存成自己的作品。' : '变成能玩的游戏。'}
                 </>
               )}
             </h1>
@@ -524,13 +700,46 @@ export function Studio({
           </div>
           {view === 'home' && (
             <div className="home-compose">
+              <div className="suggestions" role="group" aria-label="作品类型">
+                <button
+                  aria-pressed={!imageProject}
+                  onClick={() => {
+                    setCreationKind('game');
+                    draftRequest.current = null;
+                  }}
+                >
+                  游戏与 3D 场景
+                </button>
+                <button
+                  aria-pressed={imageProject}
+                  onClick={() => {
+                    setCreationKind('image');
+                    draftRequest.current = null;
+                  }}
+                >
+                  纯图片制作
+                </button>
+              </div>
+              {imageProject && (
+                <p>
+                  专门对话 · 图片版本 · 原尺寸下载。使用 Codex
+                  生图，也可导入已有图片。
+                </p>
+              )}
               {composer}
               <div className="suggestions">
-                {[
-                  '用抽卡控制飞船躲避陨石',
-                  '一家会发生奇遇的猫咪咖啡馆',
-                  '把音乐节奏变成迷宫机关',
-                ].map((idea) => (
+                {(imageProject
+                  ? [
+                      '古院仰视，紫色花树与蓝天透光',
+                      '保留构图，讨论夜景配色',
+                      '整理这个场景的生图提示词',
+                    ]
+                  : [
+                      '用抽卡控制飞船躲避陨石',
+                      '一家会发生奇遇的猫咪咖啡馆',
+                      '把音乐节奏变成迷宫机关',
+                    ]
+                ).map((idea) => (
                   <button key={idea} onClick={() => draft(idea)}>
                     <Plus size={13} />
                     {idea}
@@ -573,11 +782,13 @@ export function Studio({
                         </div>
                       )}
                       <span className="project-tag">
-                        {project.source === 'sample'
-                          ? '参考作品'
-                          : project.released_version_id
-                            ? '已发布'
-                            : '私有作品'}
+                        {project.media_kind === 'image'
+                          ? '图片作品'
+                          : project.source === 'sample'
+                            ? '参考作品'
+                            : project.released_version_id
+                              ? '已发布'
+                              : '私有作品'}
                       </span>
                     </div>
                     <div className="project-info">
@@ -607,8 +818,8 @@ export function Studio({
             ) : (
               <div className="empty-library">
                 <Gamepad2 size={34} />
-                <h3>第一款游戏，从你的想法开始</h3>
-                <p>创建后，游戏版本和项目记忆都会保存在这里。</p>
+                <h3>第一个作品，从你的想法开始</h3>
+                <p>创建后，作品版本和项目记忆都会保存在这里。</p>
               </div>
             )}
           </section>
@@ -668,6 +879,52 @@ export function Studio({
           </div>
           <div className="workspace">
             <section className="preview-area">
+              {imageProject && detail && (
+                <ImageBatchPanel
+                  detail={detail}
+                  disabled={busy || running || !conversationReady}
+                  model={model}
+                  prepare={async () => canvas.current?.prepareSubmission()}
+                  onRefresh={refreshDetail}
+                  onView={(id) => {
+                    setSelectedVersion(id);
+                    setWorkspaceView('play');
+                  }}
+                  onCurrent={(id) => {
+                    const v = detail.versions.find((v) => v.id === id);
+                    if (v) void restore(v);
+                  }}
+                />
+              )}
+              {imageProject && (
+                <div className="preview-toolbar">
+                  <label className="button">
+                    导入图片版本
+                    <input
+                      type="file"
+                      accept="image/png,image/jpeg"
+                      disabled={busy || running || !conversationReady}
+                      style={{ maxWidth: 190 }}
+                      onChange={(e) => {
+                        const file = e.target.files?.[0];
+                        e.target.value = '';
+                        if (file) void importArtwork(file);
+                      }}
+                    />
+                  </label>
+                  {currentVersion && !currentVersion.validation.images && (
+                    <button
+                      className="button"
+                      onClick={() => void downloadArtwork()}
+                    >
+                      {currentVersion.validation.images
+                        ? '下载本组第一张 PNG'
+                        : '下载当前版本 PNG'}
+                    </button>
+                  )}
+                  <small>PNG/JPEG · 12 MB 内 · 导入不消耗制作额度</small>
+                </div>
+              )}
               <div className="preview-toolbar">
                 <div
                   className="workspace-tabs"
@@ -681,7 +938,8 @@ export function Studio({
                     aria-controls="play-panel"
                     onClick={() => setWorkspaceView('play')}
                   >
-                    <Gamepad2 size={15} /> 在线试玩
+                    <Gamepad2 size={15} />{' '}
+                    {imageProject ? '图片预览' : '在线试玩'}
                   </button>
                   <button
                     id="process-tab"
@@ -760,32 +1018,49 @@ export function Studio({
                 className={`game-stage ${device === 'mobile' ? 'narrow' : ''}`}
               >
                 {currentVersion?.previewUrl ? (
-                  <GameFrame
-                    key={`${currentVersion.id}-${reload}`}
-                    title="游戏试玩"
-                    gameTitle={detail?.project.title}
-                    src={currentVersion.previewUrl}
-                    onRetry={() => setReload((value) => value + 1)}
-                  />
+                  imageProject ? (
+                    <ImageVersionGallery
+                      key={currentVersion.id}
+                      projectId={projectId!}
+                      version={currentVersion}
+                      title={detail?.project.title || '图片作品'}
+                    />
+                  ) : (
+                    <GameFrame
+                      key={`${currentVersion.id}-${reload}`}
+                      title={imageProject ? '图片预览' : '游戏试玩'}
+                      gameTitle={detail?.project.title}
+                      src={currentVersion.previewUrl}
+                      onRetry={() => setReload((value) => value + 1)}
+                    />
+                  )
                 ) : (
                   <div className="preview-empty">
                     <div className="empty-orbit">
                       <Gamepad2 size={32} />
                     </div>
                     <h2>
-                      {running && latestJob.kind !== 'chat'
+                      {running && latestJob?.kind !== 'chat'
                         ? '你的世界，正在成形'
-                        : '在这里，试玩你的想法'}
+                        : imageProject
+                          ? '在这里，保存你的图片作品'
+                          : '在这里，试玩你的想法'}
                     </h2>
                     <p>
-                      {running && latestJob.kind !== 'chat'
-                        ? '制作完成并检查通过后，游戏会出现在这里。'
-                        : '先在右侧聊聊玩法，想法明确后再开始制作。'}
+                      {running && latestJob?.kind !== 'chat'
+                        ? imageProject
+                          ? '图片生成并保存后会出现在这里。'
+                          : '制作完成并检查通过后，游戏会出现在这里。'
+                        : imageProject
+                          ? '在右侧描述画面并要求生成，或导入已有图片。每次修改都会另存新版本。'
+                          : '先在右侧聊聊玩法，想法明确后再开始制作。'}
                     </p>
                     {running && (
                       <span className="stage-status">
                         <LoaderCircle className="spin" size={15} />
-                        {phaseLabels[latestJob.phase]}
+                        {latestJob
+                          ? phaseLabels[latestJob.phase]
+                          : '等待批量制作'}
                       </span>
                     )}
                   </div>
@@ -801,7 +1076,7 @@ export function Studio({
                 <DevelopmentProcess
                   detail={detail}
                   busy={busy}
-                  ready={ready}
+                  ready={imageProject ? conversationReady : ready}
                   onStart={(job) => void startPlan(job)}
                   onPlay={(id) => {
                     setSelectedVersion(
@@ -837,21 +1112,28 @@ export function Studio({
                   {currentVersion ? (
                     <>
                       <Check size={13} />
-                      {currentVersion.validation.environment?.kind === 'docker'
-                        ? '已在独立容器中通过启动与重开检查'
-                        : '已通过启动与重开检查'}
+                      {currentVersion.validation.image
+                        ? `图片已保存 · ${currentVersion.validation.image.width} × ${currentVersion.validation.image.height}`
+                        : currentVersion.validation.environment?.kind ===
+                            'docker'
+                          ? '已在独立容器中通过启动与重开检查'
+                          : '已通过启动与重开检查'}
                     </>
                   ) : (
                     <>
                       <Clock3 size={13} />
-                      等待第一个可玩版本
+                      {imageProject
+                        ? '等待第一个图片版本'
+                        : '等待第一个可玩版本'}
                     </>
                   )}
                 </span>
                 <span>
-                  {device === 'mobile'
-                    ? '窄屏预览不代表已适配触屏'
-                    : '点击游戏区域开始操作'}
+                  {imageProject
+                    ? '每个版本独立保存，可下载原尺寸图片'
+                    : device === 'mobile'
+                      ? '窄屏预览不代表已适配触屏'
+                      : '点击游戏区域开始操作'}
                 </span>
               </div>
               {selectedVersion && (
@@ -895,11 +1177,19 @@ export function Studio({
                         )}
                       </div>
                       <p>{message.content}</p>
+                      {message.role === 'user' &&
+                        job?.model === 'gpt-6-astra' && (
+                          <small>制作模型：GPT-6 Astra</small>
+                        )}
                       {planMessage && (
                         <PlanSummary
                           plan={job.plan!}
                           onView={() => setWorkspaceView('process')}
-                          disabled={busy || running || !ready}
+                          disabled={
+                            busy ||
+                            running ||
+                            !(imageProject ? conversationReady : ready)
+                          }
                           onStart={
                             job.id === latestJob?.id &&
                             job.kind === 'chat' &&
@@ -922,20 +1212,28 @@ export function Studio({
                     </p>
                   </div>
                 )}
-                {running && (
+                {jobRunning && (
                   <div className="job-progress" role="status">
                     <strong>
                       <LoaderCircle className="spin" size={14} />
                       {latestJob.cancel_requested
                         ? '正在停止'
-                        : phaseLabels[latestJob.phase]}
+                        : latestJob
+                          ? phaseLabels[latestJob.phase]
+                          : '等待批量制作'}
                     </strong>
                     <p>{detail?.events.at(-1)?.message}</p>
                     <button
                       disabled={latestJob.cancel_requested || busy}
                       onClick={() =>
                         void action(async () => {
-                          await api(`/api/jobs/${latestJob.id}/cancel`, {});
+                          if (activeBatch)
+                            await api(
+                              `/api/projects/${projectId}/image-batches/${activeBatch.id}/cancel`,
+                              {},
+                            );
+                          else
+                            await api(`/api/jobs/${latestJob.id}/cancel`, {});
                         })
                       }
                     >
@@ -1002,7 +1300,9 @@ export function Studio({
         {modal === 'history' && (
           <>
             <p className="dialog-description">
-              查看之前的游戏及设计画布。恢复会把当时的游戏和画布保存成新版本；没有画布的早期版本会恢复为空画布。全部历史与已发布版本保留。
+              {imageProject
+                ? '查看之前的图片。设为当前版本会切换到所选图片及其参考画布，不新增版本。全部历史与已发布版本保留。'
+                : '查看之前的游戏及设计画布。恢复会把当时的游戏和画布保存成新版本；没有画布的早期版本会恢复为空画布。全部历史与已发布版本保留。'}
             </p>
             <div className="version-list">
               {detail?.versions.map((version) => (
@@ -1015,6 +1315,8 @@ export function Studio({
                   >
                     <strong>
                       版本 {version.number}
+                      {version.validation.images &&
+                        ` · ${version.validation.images.length} 张图片`}
                       {version.id === detail.project.latest_version_id && (
                         <span className="small-badge">当前</span>
                       )}
@@ -1034,7 +1336,7 @@ export function Studio({
                     }
                     onClick={() => void restore(version)}
                   >
-                    恢复
+                    {imageProject ? '设为当前版本' : '恢复'}
                   </button>
                 </div>
               ))}

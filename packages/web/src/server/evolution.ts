@@ -115,8 +115,8 @@ export async function submitCandidate(viewer: Viewer | null, raw: unknown) {
       )
     )
       throw new StudioError('来源版本尚未通过基础验收。');
-    const id = randomUUID(),
-      hash = contentHash(input.lesson);
+    const id = randomUUID();
+    const hash = contentHash(input.lesson);
     const prior = (
       await client.query(
         'SELECT id FROM studio_evolution_candidates WHERE experience_id=$1 AND lesson_index=$2 AND content_hash=$3',
@@ -195,8 +195,8 @@ export async function createKnowledgeRelease(
   raw: unknown,
 ) {
   requireEvolutionReviewer(viewer);
-  const input = releaseInput.parse(raw),
-    suite = await regressionSuite();
+  const input = releaseInput.parse(raw);
+  const suite = await regressionSuite();
   return transaction(async (client) => {
     const active = (
       await client.query(
@@ -286,8 +286,8 @@ export async function activateKnowledgeRelease(
   raw: unknown,
 ) {
   requireEvolutionReviewer(viewer);
-  const input = activateInput.parse(raw),
-    suite = await regressionSuite();
+  const input = activateInput.parse(raw);
+  const suite = await regressionSuite();
   return transaction(async (client) => {
     const active = (
       await client.query(

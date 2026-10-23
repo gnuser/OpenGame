@@ -6,11 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import sharp from 'sharp';
 import pg from 'pg';
-import type {
-  CanvasRecord,
-  CanvasSnapshot,
-  CanvasAsset,
-} from '../../src/shared/canvas';
+import type { CanvasSnapshot, CanvasAsset } from '../../src/shared/canvas';
 import { canvasAssetPath, emptyCanvas } from '../../src/shared/canvas';
 
 process.env.OPENGAME_ACCESS_MODE = 'invite';

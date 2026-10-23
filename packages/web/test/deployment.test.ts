@@ -45,6 +45,30 @@ test('public configuration fails closed and HTTPS uses host-only secure cookies'
     }).status,
     0,
   );
+  assert.notEqual(
+    inspect({
+      OPENGAME_ACCESS_MODE: 'invite',
+      OPENGAME_AUTH_PROVIDER: 'privy',
+      OPENGAME_PRIVY_APP_ID: '',
+    }).status,
+    0,
+  );
+  assert.notEqual(
+    inspect({
+      OPENGAME_ACCESS_MODE: 'local',
+      OPENGAME_AUTH_PROVIDER: 'privy',
+      OPENGAME_PRIVY_APP_ID: 'synthetic-privy-app',
+    }).status,
+    0,
+  );
+  assert.equal(
+    inspect({
+      OPENGAME_ACCESS_MODE: 'invite',
+      OPENGAME_AUTH_PROVIDER: 'privy',
+      OPENGAME_PRIVY_APP_ID: 'synthetic-privy-app',
+    }).status,
+    0,
+  );
   const secure = inspect({ OPENGAME_ACCESS_MODE: 'invite' });
   assert.equal(secure.status, 0, secure.stderr);
   assert.match(

@@ -133,7 +133,9 @@ export async function uploadCanvasImage(
     throw new StudioError('图片编码无效。');
   if (source.length > canvasLimits.assetBytes)
     throw new StudioError('单张图片不能超过 2 MB。', 413);
-  let bytes: Buffer, width: number, height: number;
+  let bytes: Buffer;
+  let width: number;
+  let height: number;
   try {
     const metadata = await sharp(source, {
       limitInputPixels: 4_194_304,

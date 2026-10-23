@@ -147,7 +147,7 @@ export async function runEvolutionRegression(options: {
           options.signal,
           45000,
         );
-      } catch (error) {
+      } catch {
         options.signal.throwIfAborted();
         // A failed assertion writes its structured report before exiting 1.
         output = await container.exec(
@@ -180,7 +180,7 @@ export async function runEvolutionRegression(options: {
         tests: report.tests,
         durationMs: Date.now() - started,
       });
-    } catch (error) {
+    } catch {
       options.signal.throwIfAborted();
       results.push({
         id: item.id,

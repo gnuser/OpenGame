@@ -1,3 +1,4 @@
+import { isGenerationModel, type GenerationModel } from '../shared/models';
 import { lstatSync } from 'node:fs';
 import { lstat, mkdir } from 'node:fs/promises';
 import path from 'node:path';
@@ -41,9 +42,15 @@ export async function prepareGeneratorWorkspace(cwd: string): Promise<void> {
   }
 }
 
-export function generatorArguments(cwd: string, readOnly = false): string[] {
+export function generatorArguments(
+  cwd: string,
+  readOnly = false,
+  model: GenerationModel = 'default',
+): string[] {
+  if (!isGenerationModel(model)) throw new Error('不支持的制作模型。');
   return [
     'exec',
+    ...(model === 'default' ? [] : ['--model', model]),
     '--ignore-user-config',
     '--ignore-rules',
     '--strict-config',

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { productionPlanSchema } from './game-production';
 
 export const developmentPlanSchema = z
   .object({
@@ -16,6 +17,8 @@ export const developmentPlanSchema = z
       .min(1)
       .max(5),
     checks: z.array(z.string().trim().min(1).max(250)).min(1).max(5),
+    // Optional for saved legacy plans and image projects; game builds fill it before editing.
+    production: productionPlanSchema.optional(),
   })
   .strict();
 
@@ -48,5 +51,5 @@ export function parseConversationResult(text: string): ConversationResult {
 }
 
 export function planInstructions(plan: DevelopmentPlan): string {
-  return `本轮目标：${plan.goal}\n已明确的约定：\n${plan.decisions.map((x) => `- ${x}`).join('\n')}\n实施任务：\n${plan.tasks.map((t, i) => `${i + 1}. ${t.title}：${t.detail}`).join('\n')}\n试玩验收要点（未经平台逐项验证）：\n${plan.checks.map((x) => `- ${x}`).join('\n')}`;
+  return `本轮目标：${plan.goal}\n已明确的约定：\n${plan.decisions.map((x) => `- ${x}`).join('\n')}\n实施任务：\n${plan.tasks.map((t, i) => `${i + 1}. ${t.title}：${t.detail}`).join('\n')}\n试玩验收要点（未经平台逐项验证）：\n${plan.checks.map((x) => `- ${x}`).join('\n')}${plan.production ? `\n制作体验与验收约定：\n${JSON.stringify(plan.production)}` : ''}`;
 }

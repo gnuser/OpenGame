@@ -45,7 +45,7 @@ export interface CanvasHandle {
   clearSelection(): void;
 }
 export interface CanvasStatus {
-  images?: { id: string; title: string }[];
+  images?: Array<{ id: string; title: string }>;
   titles: string[];
   imageCount: number;
   dirty: boolean;
@@ -90,10 +90,7 @@ export const DesignCanvas = forwardRef<
     locked: boolean;
     onStatus: (status: CanvasStatus) => void;
   }
->(function DesignCanvas(
-  { projectId, memberId, historicalVersion, locked, onStatus },
-  ref,
-) {
+>(({ projectId, memberId, historicalVersion, locked, onStatus }, ref) => {
   const url = `/api/projects/${projectId}/canvas`;
   const storageKey = `opengame-canvas-${memberId || 'local'}-${projectId}`;
   const [base, setBase] = useState<CanvasRecord>();
@@ -171,12 +168,13 @@ export const DesignCanvas = forwardRef<
   useEffect(() => {
     void load(true).catch((e) => setError(e.message));
   }, [load]);
+  const historicalVersionId = historicalVersion?.id;
   useEffect(() => {
     setHistorical(undefined);
     setActive(undefined);
-    if (!historicalVersion) return;
+    if (!historicalVersionId) return;
     let alive = true;
-    void request<CanvasRecord>(`${url}?versionId=${historicalVersion.id}`)
+    void request<CanvasRecord>(`${url}?versionId=${historicalVersionId}`)
       .then((value) => {
         if (alive) setHistorical(value);
       })
@@ -186,7 +184,7 @@ export const DesignCanvas = forwardRef<
     return () => {
       alive = false;
     };
-  }, [historicalVersion?.id, url]);
+  }, [historicalVersionId, url]);
   useEffect(() => {
     if (!base) return;
     try {
@@ -625,8 +623,8 @@ export const DesignCanvas = forwardRef<
                   </defs>
                   {board.nodes.flatMap((n) =>
                     n.references.map((target) => {
-                      const a = board.layout[n.id],
-                        b = board.layout[target];
+                      const a = board.layout[n.id];
+                      const b = board.layout[target];
                       if (!a || !b) return null;
                       const horizontal =
                         Math.abs(b.x - a.x) > Math.abs(b.y - a.y);
@@ -926,3 +924,5 @@ export const DesignCanvas = forwardRef<
     </div>
   );
 });
+
+DesignCanvas.displayName = 'DesignCanvas';

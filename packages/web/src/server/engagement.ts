@@ -8,7 +8,10 @@ export const engagementColumns = `
   (SELECT count(*)::int FROM studio_game_ratings WHERE project_id=p.id AND rating=-1) AS dislikes,
   (SELECT count(*)::int FROM studio_game_visits WHERE project_id=p.id) AS visits`;
 
-export async function gameStats(projectId: string, voterKey: string): Promise<GameStats> {
+export async function gameStats(
+  projectId: string,
+  voterKey: string,
+): Promise<GameStats> {
   await migrate();
   const result = await pool().query(
     `SELECT ${engagementColumns},
@@ -37,7 +40,10 @@ export async function recordEngagement(
         [projectId, input.visitId],
       );
     } else if (input.rating === 0) {
-      await client.query('DELETE FROM studio_game_ratings WHERE project_id=$1 AND voter_key=$2', [projectId, voterKey]);
+      await client.query(
+        'DELETE FROM studio_game_ratings WHERE project_id=$1 AND voter_key=$2',
+        [projectId, voterKey],
+      );
     } else {
       await client.query(
         'INSERT INTO studio_game_ratings(project_id,voter_key,rating) VALUES($1,$2,$3) ON CONFLICT(project_id,voter_key) DO UPDATE SET rating=excluded.rating',

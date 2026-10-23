@@ -106,6 +106,7 @@ async function version(ownerId: string) {
 test('all data endpoints require an active session and writes enforce origin', async () => {
   for (const route of [
     'projects',
+    'account',
     'marketplace',
     'knowledge',
     'standards',
@@ -217,7 +218,9 @@ test('preview tickets protect all assets, scope, logout and revoked accounts', a
   const released = ticket(gameUrl(p.versionId, b.viewer, 'released'));
   assert.equal(await authorizedArtifact(p.versionId, released), null);
   const before = await (await api('marketplace', b.cookie)).json();
-  assert.ok(!before.projects.some((item: { id: string }) => item.id === p.projectId));
+  assert.ok(
+    !before.projects.some((item: { id: string }) => item.id === p.projectId),
+  );
   await publishVersion(p.projectId, p.versionId, null, a.id);
   const listing = await api('marketplace', b.cookie);
   assert.equal(listing.status, 200);
@@ -228,7 +231,10 @@ test('preview tickets protect all assets, scope, logout and revoked accounts', a
   assert.ok(shared);
   assert.equal(shared.released_version_id, p.versionId);
   assert.equal(shared.owner_id, undefined);
-  assert.equal(await authorizedArtifact(p.versionId, ticket(shared.previewUrl)), p.versionId);
+  assert.equal(
+    await authorizedArtifact(p.versionId, ticket(shared.previewUrl)),
+    p.versionId,
+  );
   assert.equal((await api(`projects/${p.projectId}`, b.cookie)).status, 404);
   assert.equal(await authorizedArtifact(p.versionId, released), p.versionId);
   assert.equal((await api(`play/${p.projectId}`, b.cookie)).status, 200);
@@ -283,34 +289,167 @@ test('quotas serialize concurrent creations and idempotent retries consume one s
   );
 });
 test('ratings are per account, reversible and visits are idempotent', async () => {
-  const a = await member('Rating A'), b = await member('Rating B');
+  const a = await member('Rating A'),
+    b = await member('Rating B');
   const p = await version(a.id);
   const route = `play/${p.projectId}`;
-  assert.equal((await api(`${route}/rating`, b.cookie, { rating: 1 })).status, 404);
+  assert.equal(
+    (await api(`${route}/rating`, b.cookie, { rating: 1 })).status,
+    404,
+  );
   await publishVersion(p.projectId, p.versionId, null, a.id);
   assert.equal((await api(`${route}/rating`, '', { rating: 1 })).status, 401);
-  assert.equal((await api(`${route}/rating`, b.cookie, { rating: 2 })).status, 400);
-  assert.equal((await api(`${route}/visit`, b.cookie, { visitId: 'bad' })).status, 400);
+  assert.equal(
+    (await api(`${route}/rating`, b.cookie, { rating: 2 })).status,
+    400,
+  );
+  assert.equal(
+    (await api(`${route}/visit`, b.cookie, { visitId: 'bad' })).status,
+    400,
+  );
   for (let i = 0; i < 2; i++)
-    assert.equal((await api(`${route}/rating`, a.cookie, { rating: 1 })).status, 200);
-  let stats = await (await api(`${route}/rating`, b.cookie, { rating: -1 })).json();
+    assert.equal(
+      (await api(`${route}/rating`, a.cookie, { rating: 1 })).status,
+      200,
+    );
+  let stats = await (
+    await api(`${route}/rating`, b.cookie, { rating: -1 })
+  ).json();
   assert.deepEqual(stats, { likes: 1, dislikes: 1, visits: 0, myRating: -1 });
   stats = await (await api(`${route}/rating`, b.cookie, { rating: 1 })).json();
   assert.deepEqual(stats, { likes: 2, dislikes: 0, visits: 0, myRating: 1 });
   stats = await (await api(`${route}/rating`, b.cookie, { rating: 0 })).json();
   assert.deepEqual(stats, { likes: 1, dislikes: 0, visits: 0, myRating: 0 });
   const visitId = randomUUID();
-  await Promise.all(Array.from({ length: 3 }, () => api(`${route}/visit`, b.cookie, { visitId })));
-  stats = await (await api(`${route}/visit`, a.cookie, { visitId: randomUUID() })).json();
+  await Promise.all(
+    Array.from({ length: 3 }, () =>
+      api(`${route}/visit`, b.cookie, { visitId }),
+    ),
+  );
+  stats = await (
+    await api(`${route}/visit`, a.cookie, { visitId: randomUUID() })
+  ).json();
   assert.equal(stats.visits, 2);
   const play = await (await api(route, b.cookie)).json();
   assert.equal(play.stats.visits, 2);
   assert.equal(play.stats.myRating, 0);
   const listing = await (await api('marketplace', b.cookie)).json();
-  const card = listing.projects.find((item: { id: string }) => item.id === p.projectId);
+  const card = listing.projects.find(
+    (item: { id: string }) => item.id === p.projectId,
+  );
   assert.equal(card.likes, 1);
   assert.equal(card.dislikes, 0);
   assert.equal(card.visits, 2);
+});
+
+test('referrals award once on first login and bonus credits work beyond both base limits', async () => {
+  const a = await member('Inviter');
+  assert.equal((await api('invitations', '', { label: 'Friend' })).status, 401);
+  assert.equal((await api('invitations', a.cookie, { label: '' })).status, 400);
+  const foreign = request('invitations', a.cookie, { label: 'Friend' });
+  foreign.headers.set('origin', 'https://foreign.example');
+  assert.equal((await dispatch(foreign, ['invitations'])).status, 403);
+  await pool().query(
+    'UPDATE studio_users SET daily_job_limit=1,total_job_limit=1 WHERE id=$1',
+    [a.id],
+  );
+  const base = await submitJob({
+    ownerId: a.id,
+    prompt: 'Base',
+    requestKey: randomUUID(),
+  });
+  await cancelJob(base.jobId, a.id);
+  const quota = async () => await (await api('account', a.cookie)).json();
+  assert.equal((await quota()).available, 0);
+  const response = await api('invitations', a.cookie, { label: 'Friend' });
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get('cache-control'), 'no-store');
+  const invitation = await response.json();
+  assert.equal((await quota()).bonusRemaining, 0);
+  const logins = await Promise.all(
+    Array.from({ length: 4 }, () =>
+      api('session', '', { code: invitation.code }),
+    ),
+  );
+  assert.ok(logins.every((r) => r.status === 200));
+  const friendCookie = logins[0].headers.get('set-cookie')!.split(';')[0];
+  assert.equal(
+    (await (await api('account', friendCookie)).json()).bonusRemaining,
+    0,
+  );
+  assert.deepEqual(await quota(), {
+    available: 5,
+    dailyRemaining: 0,
+    totalRemaining: 0,
+    bonusRemaining: 5,
+    paidRemaining: 0,
+    invited: 1,
+    activated: 1,
+    invitationLimit: 10,
+  });
+  for (let i = 0; i < 5; i++) {
+    const input = {
+      ownerId: a.id,
+      projectId: base.projectId,
+      prompt: 'Bonus',
+      requestKey: randomUUID(),
+    };
+    const [x, y] = await Promise.all([submitJob(input), submitJob(input)]);
+    assert.deepEqual(x, y);
+    await cancelJob(x.jobId, a.id);
+    assert.equal((await quota()).available, 4 - i);
+  }
+  await assert.rejects(
+    submitJob({
+      ownerId: a.id,
+      projectId: base.projectId,
+      prompt: 'Empty',
+      requestKey: randomUUID(),
+    }),
+    /次数上限/,
+  );
+  await api('session', '', { code: invitation.code });
+  assert.equal((await quota()).bonusRemaining, 0);
+  // Ageing bonus jobs must not replenish the one-time reward.
+  await pool().query(
+    "UPDATE studio_jobs SET created_at=now()-interval '2 days' WHERE project_id=$1",
+    [base.projectId],
+  );
+  assert.equal((await quota()).available, 0);
+});
+
+test('invitation creation is bounded under concurrency and expiry cannot outlive inviter', async () => {
+  const a = await member('Bounded inviter');
+  await pool().query(
+    "UPDATE studio_users SET expires_at=now()+interval '1 day' WHERE id=$1",
+    [a.id],
+  );
+  const responses = await Promise.all(
+    Array.from({ length: 12 }, (_, i) =>
+      api('invitations', a.cookie, { label: `Friend ${i}` }),
+    ),
+  );
+  assert.equal(responses.filter((r) => r.status === 200).length, 10);
+  assert.equal(responses.filter((r) => r.status === 429).length, 2);
+  assert.equal(
+    (
+      await pool().query(
+        'SELECT count(*)::int AS n FROM studio_users c JOIN studio_users p ON c.invited_by=p.id WHERE p.id=$1 AND c.expires_at>p.expires_at',
+        [a.id],
+      )
+    ).rows[0].n,
+    0,
+  );
+  const invitation = await responses.find((r) => r.status === 200)!.json();
+  await pool().query(
+    "UPDATE studio_users SET expires_at=now()-interval '1 second' WHERE access_hash=$1",
+    [hashToken(invitation.code)],
+  );
+  assert.equal(
+    (await api('session', '', { code: invitation.code })).status,
+    401,
+  );
+  assert.equal((await (await api('account', a.cookie)).json()).activated, 0);
 });
 
 test('credentials are hashed, expiring, and login attempts are bounded', async () => {

@@ -51,7 +51,8 @@ export function PlanSummary({
 }
 
 function runLabel(job?: Job, version?: GameVersion) {
-  if (version) return `版本 ${version.number} · 可试玩`;
+  if (version)
+    return `版本 ${version.number} · ${version.validation.image ? '图片' : '可试玩'}`;
   if (!job) return '待整理';
   if (job.status === 'cancelled') return '已停止';
   if (job.status === 'failed') return '未完成';
@@ -59,9 +60,11 @@ function runLabel(job?: Job, version?: GameVersion) {
   return phaseLabels[job.phase];
 }
 
-function RunProgress({ job }: { job: Job }) {
+function RunProgress({ job, image }: { job: Job; image: boolean }) {
   if (job.kind === 'chat') return null;
-  const steps = ['任务已整理', '准备与实施', '启动与重开检查', '保存可玩版本'];
+  const steps = image
+    ? ['需求已保存', '准备图片', '图片解码检查', '保存图片版本']
+    : ['任务已整理', '准备与实施', '启动与重开检查', '保存可玩版本'];
   const phase = job.phase;
   const current =
     phase === 'done'
@@ -111,13 +114,13 @@ export function DevelopmentProcess({
   if (!detail) return <div className="process-empty">正在打开制作记录…</div>;
   const latest = detail.jobs[0];
   const active = latest?.status === 'queued' || latest?.status === 'running';
-  const entries: {
+  const entries: Array<{
     id: string;
     created: string;
     plan?: DevelopmentPlan | null;
     job?: Job;
     version?: GameVersion;
-  }[] = [
+  }> = [
     ...detail.jobs
       .filter((j) => j.plan && !j.result_version_id)
       .map((job) => ({
@@ -204,7 +207,12 @@ export function DevelopmentProcess({
                 </span>
               </summary>
               <div className="process-round-body">
-                {job?.kind === 'build' && plan && <RunProgress job={job} />}
+                {job?.kind === 'build' && plan && (
+                  <RunProgress
+                    job={job}
+                    image={detail?.project.media_kind === 'image'}
+                  />
+                )}
                 {!!plan?.decisions.length && (
                   <div className="process-decisions">
                     <strong>已经明确</strong>
@@ -279,7 +287,9 @@ export function DevelopmentProcess({
                         />
                       )}
                       <span>
-                        <Gamepad2 size={16} /> 试玩版本 {version.number}
+                        <Gamepad2 size={16} />{' '}
+                        {version.validation.image ? '图片版本' : '试玩版本'}{' '}
+                        {version.number}
                       </span>
                     </button>
                     <div>
@@ -287,11 +297,13 @@ export function DevelopmentProcess({
                       <p>{version.summary}</p>
                       <span className="process-validation">
                         <Check size={14} />
-                        {version.validation.build &&
-                        version.validation.start &&
-                        version.validation.restart
-                          ? '构建、启动与重开检查通过'
-                          : '查看此版本的试玩结果'}
+                        {version.validation.image
+                          ? `图片检查通过 · ${version.validation.image.width} × ${version.validation.image.height}`
+                          : version.validation.build &&
+                              version.validation.start &&
+                              version.validation.restart
+                            ? '构建、启动与重开检查通过'
+                            : '查看此版本的试玩结果'}
                       </span>
                     </div>
                   </div>

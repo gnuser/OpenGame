@@ -14,8 +14,14 @@ import { dataRoot } from './config';
 import { assertProjectFiles, projectFiles } from './project-files';
 import { run } from './process';
 import type { ValidationReport } from '../shared/types';
+import {
+  acceptanceScreenshots,
+  qualityScreenshots,
+} from '../shared/game-quality';
+import type { AcceptanceCase } from '../shared/game-production';
+import { parseAcceptanceCases } from './game-playtest';
 
-export const runtimeImage = 'opengame-project-runtime:0.1.0';
+export const runtimeImage = 'opengame-project-runtime:0.4.0';
 const instance = createHash('sha256')
   .update(dataRoot)
   .digest('hex')
@@ -26,7 +32,8 @@ const allowedArtifacts = new Set([
   'game.js',
   'game.css',
   'base.css',
-  'preview.png',
+  ...qualityScreenshots.map((shot) => shot.file),
+  ...acceptanceScreenshots,
 ]);
 const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 
@@ -222,6 +229,7 @@ export class ProjectContainer {
     readonly input: string,
     readonly projectId: string,
     readonly image: string,
+    private readonly acceptance: AcceptanceCase[],
   ) {}
 
   static async start(options: {
@@ -231,10 +239,12 @@ export class ProjectContainer {
     image: string;
     signal: AbortSignal;
     owner?: 'worker' | 'verification';
+    acceptance?: AcceptanceCase[];
   }): Promise<ProjectContainer> {
     options.signal.throwIfAborted();
     if (!uuid.test(options.projectId) || !uuid.test(options.jobId))
       throw new Error('无效的项目或任务编号。');
+    const acceptance = parseAcceptanceCases(options.acceptance || []);
     await assertProjectFiles(options.workspace);
     const parent = path.join(dataRoot, 'runtime-inputs');
     await mkdir(parent, { recursive: true, mode: 0o700 });
@@ -245,9 +255,16 @@ export class ProjectContainer {
       input,
       options.projectId,
       options.image,
+      acceptance,
     );
     try {
       await chmod(input, 0o755);
+      // Authored by the read-only reviewer and frozen by the host, never read from the game.
+      await writeFile(
+        path.join(input, 'acceptance.json'),
+        JSON.stringify(container.acceptance),
+        { mode: 0o444 },
+      );
       // Copy a closed set of ordinary files, not the workspace's Git database,
       // platform source, model credentials, or another project's directories.
       for (const file of await projectFiles(options.workspace)) {
@@ -345,6 +362,55 @@ export class ProjectContainer {
       typeof report.checkedAt !== 'string'
     )
       throw new RuntimeUnavailableError('独立环境返回了无效的检查结果。');
+    const quality = report.quality;
+    if (
+      !quality ||
+      !Array.isArray(quality.screenshots) ||
+      quality.screenshots.length !== qualityScreenshots.length ||
+      !qualityScreenshots.every((shot, index) => {
+        const actual = quality.screenshots[index];
+        return (
+          actual?.file === shot.file &&
+          actual.label === shot.label &&
+          actual.width === shot.width &&
+          actual.height === shot.height
+        );
+      }) ||
+      !quality.playtest ||
+      !['passed', 'missing'].includes(quality.playtest.status) ||
+      !Number.isInteger(quality.playtest.steps) ||
+      quality.playtest.steps < 0 ||
+      quality.playtest.steps > 12 ||
+      (quality.playtest.status === 'missing'
+        ? quality.playtest.steps !== 0
+        : quality.playtest.steps === 0) ||
+      !Array.isArray(quality.warnings) ||
+      quality.warnings.length > 12 ||
+      quality.warnings.some(
+        (warning) => typeof warning !== 'string' || warning.length > 500,
+      ) ||
+      quality.reviewed !== undefined ||
+      quality.production !== undefined ||
+      !Array.isArray(quality.acceptance) ||
+      quality.acceptance.length !== this.acceptance.length ||
+      !this.acceptance.every((test, index) => {
+        const result = quality.acceptance![index];
+        return (
+          result?.criterionId === test.criterionId &&
+          result.variant === test.variant &&
+          result.scenario === test.scenario &&
+          ['passed', 'failed'].includes(result.status) &&
+          result.steps === test.plan.steps.length &&
+          result.screenshot === acceptanceScreenshots[index] &&
+          (result.status === 'passed'
+            ? result.error === undefined
+            : typeof result.error === 'string' &&
+              result.error.length > 0 &&
+              result.error.length <= 600)
+        );
+      })
+    )
+      throw new RuntimeUnavailableError('独立环境返回了无效的画面检查结果。');
     const files: unknown = data.files;
     if (
       !Array.isArray(files) ||
@@ -353,8 +419,17 @@ export class ProjectContainer {
       files.some(
         (file) => typeof file !== 'string' || !allowedArtifacts.has(file),
       ) ||
-      !['index.html', 'game.js', 'base.css', 'preview.png'].every((file) =>
-        files.includes(file),
+      ![
+        'index.html',
+        'game.js',
+        'base.css',
+        ...qualityScreenshots.map((shot) => shot.file),
+        ...this.acceptance.map((_, i) => acceptanceScreenshots[i]),
+      ].every((file) => files.includes(file)) ||
+      files.some(
+        (file) =>
+          acceptanceScreenshots.includes(file) &&
+          !this.acceptance.some((_, i) => acceptanceScreenshots[i] === file),
       )
     )
       throw new RuntimeUnavailableError('独立环境返回了无效的游戏产物。');
@@ -405,6 +480,7 @@ export async function checkInProjectContainer(options: {
   image: string;
   signal: AbortSignal;
   owner?: 'worker' | 'verification';
+  acceptance?: AcceptanceCase[];
 }): Promise<ValidationReport> {
   const container = await ProjectContainer.start(options);
   try {

@@ -17,6 +17,16 @@ export const previewPort = Number(process.env.OPENGAME_PREVIEW_PORT || 4191);
 export const accessMode = process.env.OPENGAME_ACCESS_MODE || 'local';
 if (!['local', 'invite'].includes(accessMode))
   throw new Error('OPENGAME_ACCESS_MODE 必须是 local 或 invite。');
+export const authProvider = process.env.OPENGAME_AUTH_PROVIDER || 'invite';
+if (!['invite', 'privy'].includes(authProvider))
+  throw new Error('OPENGAME_AUTH_PROVIDER 必须是 invite 或 privy。');
+export const privyAppId = process.env.OPENGAME_PRIVY_APP_ID || '';
+if (authProvider === 'privy' && !/^[a-zA-Z0-9_-]{10,100}$/.test(privyAppId))
+  throw new Error('Privy 登录需要有效的 OPENGAME_PRIVY_APP_ID。');
+if (authProvider === 'privy' && accessMode !== 'invite')
+  throw new Error(
+    'Privy 登录需要 OPENGAME_ACCESS_MODE=invite，以保护用户数据。',
+  );
 function origin(value: string): string {
   const url = new URL(value);
   const loopback = ['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname);

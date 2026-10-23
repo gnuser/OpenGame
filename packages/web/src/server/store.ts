@@ -57,8 +57,10 @@ async function jobUsage(
 ) {
   return (
     await client.query(
-      `SELECT count(*) FILTER (WHERE j.kind=$2)::int AS total,
-    count(*) FILTER (WHERE j.kind=$2 AND j.created_at>now()-interval '24 hours')::int AS daily,
+      `SELECT count(*) FILTER (WHERE j.kind=$2 AND j.image_asset_id IS NULL AND NOT j.uses_bonus AND NOT j.uses_paid)::int AS total,
+    count(*) FILTER (WHERE j.kind=$2 AND j.image_asset_id IS NULL AND NOT j.uses_bonus AND NOT j.uses_paid AND j.created_at>now()-interval '24 hours')::int AS daily,
+    count(*) FILTER (WHERE j.uses_bonus)::int AS bonus_used,
+    count(*) FILTER (WHERE j.uses_paid)::int AS paid_used,
     count(*) FILTER (WHERE j.status IN ('queued','running'))::int AS active
     FROM studio_jobs j JOIN studio_projects p ON p.id=j.project_id WHERE p.owner_id=$1`,
       [ownerId, kind],
@@ -66,8 +68,18 @@ async function jobUsage(
   ).rows[0];
 }
 function quotaExceeded(
-  user: { daily_job_limit: number; total_job_limit: number },
-  counts: { daily: number; total: number },
+  user: {
+    daily_job_limit: number;
+    total_job_limit: number;
+    bonus_job_credits?: number;
+    paid_job_credits?: number;
+  },
+  counts: {
+    daily: number;
+    total: number;
+    bonus_used?: number;
+    paid_used?: number;
+  },
   kind: 'chat' | 'build',
 ) {
   const daily =
@@ -78,12 +90,18 @@ function quotaExceeded(
     kind === 'chat'
       ? Math.min(user.total_job_limit * 5, 10000)
       : user.total_job_limit;
-  return counts.daily >= daily || counts.total >= total;
+  return (
+    (counts.daily >= daily || counts.total >= total) &&
+    (kind === 'chat' ||
+      ((user.bonus_job_credits || 0) <= (counts.bonus_used || 0) &&
+        (user.paid_job_credits || 0) <= (counts.paid_used || 0)))
+  );
 }
 /** A design-only project does not enqueue generation or consume a creation job. */
 export async function createDraftProject(
   requestKey: string,
   ownerId?: string,
+  mediaKind: 'game' | 'image' = 'game',
 ): Promise<{ projectId: string }> {
   return transaction(async (client) => {
     await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', [
@@ -97,6 +115,8 @@ export async function createDraftProject(
     ).rows[0];
     if (existing) {
       assertOwner(existing, ownerId);
+      if (existing.media_kind !== mediaKind)
+        throw new StudioError('项目类型发生变化，请重新提交。', 409);
       return { projectId: existing.id };
     }
     if (ownerId) {
@@ -111,8 +131,15 @@ export async function createDraftProject(
     }
     const projectId = randomUUID();
     await client.query(
-      'INSERT INTO studio_projects(id,title,description,owner_id,draft_key) VALUES($1,$2,$3,$4,$5)',
-      [projectId, '新的游戏设计', '', ownerId || null, requestKey],
+      'INSERT INTO studio_projects(id,title,description,owner_id,draft_key,media_kind) VALUES($1,$2,$3,$4,$5,$6)',
+      [
+        projectId,
+        mediaKind === 'image' ? '新的图片作品' : '新的游戏设计',
+        '',
+        ownerId || null,
+        requestKey,
+        mediaKind,
+      ],
     );
     return { projectId };
   });
@@ -177,9 +204,18 @@ export async function getProject(
     messages: messages.rows,
     events: events.rows,
     previewOrigin,
+    imageBatches: (
+      await pool().query(
+        'SELECT id,project_id,base_version_id,prompt,styles,status,error,created_at,grouped,result_version_id FROM studio_image_batches WHERE project_id=$1 ORDER BY created_at DESC LIMIT 10',
+        [id],
+      )
+    ).rows,
   };
 }
 export async function submitJob(input: {
+  imageBatch?: { id: string; index: number };
+  imageAssetId?: string;
+  model?: import('../shared/models').GenerationModel;
   kind?: 'chat' | 'build';
   sourcePlanId?: string;
   canvas?: CanvasSelection;
@@ -195,6 +231,9 @@ export async function submitJob(input: {
         input.projectId || null,
         input.baseVersionId || null,
         input.prompt,
+        ...(input.imageBatch ? [input.imageBatch] : []),
+        ...(input.imageAssetId ? [input.imageAssetId] : []),
+        ...(input.model ? [input.model] : []),
         ...(input.canvas ? [input.canvas] : []),
         ...(input.kind || input.sourcePlanId
           ? [input.kind || 'build', input.sourcePlanId || null]
@@ -226,6 +265,8 @@ export async function submitJob(input: {
     }
     if (input.projectId)
       assertOwner(await lockedProject(client, input.projectId), input.ownerId);
+    let usesBonus = false;
+    let usesPaid = false;
     if (input.ownerId) {
       const users = await client.query(
         'SELECT * FROM studio_users WHERE id=$1 AND NOT disabled AND expires_at>now() FOR UPDATE',
@@ -240,13 +281,20 @@ export async function submitJob(input: {
           '你已有一个处理中任务，请完成或停止后再提交。',
           429,
         );
-      if (quotaExceeded(user, counts, kind))
+      if (!input.imageAssetId && quotaExceeded(user, counts, kind))
         throw new StudioError(
           kind === 'chat'
             ? '已达到内测对话次数上限，请稍后再试或联系邀请人。'
-            : '已达到内测制作次数上限，请稍后再试或联系邀请人。',
+            : '已达到内测制作次数上限，可在“额度与邀请”中邀请好友获得额外制作次数。',
           429,
         );
+      usesBonus =
+        !input.imageAssetId &&
+        kind === 'build' &&
+        (counts.daily >= user.daily_job_limit ||
+          counts.total >= user.total_job_limit);
+      usesPaid = usesBonus && user.bonus_job_credits <= counts.bonus_used;
+      if (usesPaid) usesBonus = false;
       if (!input.projectId) {
         await checkProjectLimit(client, input.ownerId, user.project_limit);
       }
@@ -264,6 +312,43 @@ export async function submitJob(input: {
       );
     }
     const project = await lockedProject(client, projectId);
+    const batch = input.imageBatch
+      ? (
+          await client.query(
+            "SELECT * FROM studio_image_batches WHERE id=$1 AND project_id=$2 AND status='active' FOR UPDATE",
+            [input.imageBatch.id, projectId],
+          )
+        ).rows[0]
+      : undefined;
+    if (
+      input.imageBatch &&
+      (!batch ||
+        batch.request_keys[input.imageBatch.index] !== input.requestKey)
+    )
+      throw new StudioError('批量任务已停止。', 409);
+    if (
+      !input.imageBatch &&
+      (
+        await client.query(
+          "SELECT 1 FROM studio_image_batches b JOIN studio_projects p ON p.id=b.project_id WHERE b.status='active' AND (p.id=$1 OR ($2::uuid IS NOT NULL AND p.owner_id=$2))",
+          [projectId, input.ownerId || null],
+        )
+      ).rowCount
+    )
+      throw new StudioError('请先完成或停止批量制作。', 409);
+    if (input.imageAssetId) {
+      if (
+        project.media_kind !== 'image' ||
+        input.kind === 'chat' ||
+        input.sourcePlanId
+      )
+        throw new StudioError('图片版本只能导入图片作品。');
+      const asset = await client.query(
+        'SELECT id FROM studio_image_assets WHERE id=$1 AND project_id=$2',
+        [input.imageAssetId, projectId],
+      );
+      if (!asset.rowCount) throw new StudioError('找不到本项目的图片。', 404);
+    }
     if (project.latest_version_id !== (input.baseVersionId || null))
       throw new StudioError(
         '项目已有更新，请刷新后基于最新版本继续修改。',
@@ -303,11 +388,13 @@ export async function submitJob(input: {
         throw new StudioError('开始已整理的方案时，请使用方案保存的素材。');
     }
     const jobId = randomUUID();
-    const canvas = source
-      ? source.canvas_snapshot
-      : await captureCanvas(client, projectId, input.canvas);
+    const canvas = batch
+      ? batch.canvas_snapshot
+      : source
+        ? source.canvas_snapshot
+        : await captureCanvas(client, projectId, input.canvas);
     await client.query(
-      'INSERT INTO studio_jobs(id,project_id,base_version_id,request_key,request_hash,prompt,canvas_snapshot,kind,plan) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)',
+      'INSERT INTO studio_jobs(id,project_id,base_version_id,request_key,request_hash,prompt,canvas_snapshot,kind,plan,uses_bonus,model,uses_paid,image_asset_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)',
       [
         jobId,
         projectId,
@@ -318,8 +405,17 @@ export async function submitJob(input: {
         canvas,
         input.kind || 'build',
         source?.plan || null,
+        usesBonus,
+        input.model ?? source?.model ?? 'default',
+        usesPaid,
+        input.imageAssetId || null,
       ],
     );
+    if (batch)
+      await client.query(
+        'UPDATE studio_jobs SET image_batch_id=$2,image_batch_index=$3,image_reference_version_id=$4 WHERE id=$1',
+        [jobId, batch.id, input.imageBatch!.index, batch.base_version_id],
+      );
     await client.query(
       "INSERT INTO studio_messages(id,project_id,job_id,role,content) VALUES($1,$2,$3,'user',$4)",
       [randomUUID(), projectId, jobId, input.prompt],
@@ -409,29 +505,31 @@ export async function finishPlanning(
     if (project.latest_version_id !== job.base_version_id)
       throw new StudioError('基础版本已变更，请重新梳理本轮需求。', 409);
     let build = result.action === 'implement';
+    let usesBonus = false;
+    let usesPaid = false;
     if (build && project.owner_id) {
       const user = (
         await client.query(
-          'SELECT daily_job_limit,total_job_limit FROM studio_users WHERE id=$1 AND NOT disabled AND expires_at>now() FOR UPDATE',
+          'SELECT daily_job_limit,total_job_limit,bonus_job_credits,paid_job_credits FROM studio_users WHERE id=$1 AND NOT disabled AND expires_at>now() FOR UPDATE',
           [project.owner_id],
         )
       ).rows[0];
       if (!user) throw new StudioError('内测访问已到期，请联系邀请人。', 401);
-      if (
-        quotaExceeded(
-          user,
-          await jobUsage(client, project.owner_id, 'build'),
-          'build',
-        )
-      ) {
+      const counts = await jobUsage(client, project.owner_id, 'build');
+      usesBonus =
+        counts.daily >= user.daily_job_limit ||
+        counts.total >= user.total_job_limit;
+      usesPaid = usesBonus && user.bonus_job_credits <= counts.bonus_used;
+      if (usesPaid) usesBonus = false;
+      if (quotaExceeded(user, counts, 'build')) {
         build = false;
         result.reply =
-          '本轮方案已整理，但内测制作次数已达上限，暂未开始实施。方案和讨论会保留，额度恢复后可以继续。';
+          '本轮方案已整理，但内测制作次数已达上限，暂未开始实施。方案和讨论会保留，可在“额度与邀请”中邀请好友获得额外次数后继续。';
       }
     }
     const updated = await client.query(
       `UPDATE studio_jobs SET plan=$3,planning_reply=$4,kind=$5,status=$6,phase=$7,
-       finished_at=CASE WHEN $5='chat' THEN now() ELSE NULL END
+       uses_bonus=$8,uses_paid=$9,finished_at=CASE WHEN $5='chat' THEN now() ELSE NULL END
        WHERE id=$1 AND lease_token=$2 AND status='running' AND kind='chat' AND planning_reply IS NULL AND NOT cancel_requested RETURNING *`,
       [
         job.id,
@@ -441,6 +539,8 @@ export async function finishPlanning(
         build ? 'build' : 'chat',
         build ? 'running' : 'succeeded',
         build ? 'preparing' : 'done',
+        build && usesBonus,
+        build && usesPaid,
       ],
     );
     if (!updated.rows[0])
@@ -499,6 +599,25 @@ export async function finishVersion(
       throw new StudioError('任务已停止，保留上一可玩版本。', 409);
     if (project.latest_version_id !== job.base_version_id)
       throw new StudioError('基础版本已变更，结果未覆盖当前版本。', 409);
+    if (
+      current.image_batch_id &&
+      (
+        await client.query(
+          'SELECT grouped FROM studio_image_batches WHERE id=$1',
+          [current.image_batch_id],
+        )
+      ).rows[0]?.grouped
+    ) {
+      await client.query(
+        "UPDATE studio_jobs SET status='succeeded',phase='done',prepared=$2,finished_at=now() WHERE id=$1",
+        [job.id, prepared],
+      );
+      await client.query(
+        "INSERT INTO studio_events(job_id,phase,message) VALUES($1,'done',$2)",
+        [job.id, '本张图片已完成，整批结束后统一保存为一个版本。'],
+      );
+      return;
+    }
     const count = await client.query(
       'SELECT coalesce(max(number),0)+1 AS next FROM studio_versions WHERE project_id=$1',
       [job.project_id],
@@ -532,8 +651,13 @@ export async function finishVersion(
       [randomUUID(), job.project_id, job.id, prepared.summary],
     );
     await client.query(
-      "INSERT INTO studio_events(job_id,phase,message) VALUES($1,'done','新版本已保存，可以开始试玩。')",
-      [job.id],
+      "INSERT INTO studio_events(job_id,phase,message) VALUES($1,'done',$2)",
+      [
+        job.id,
+        project.media_kind === 'image'
+          ? '图片新版本已保存，可以查看和下载。'
+          : '新版本已保存，可以开始试玩。',
+      ],
     );
     await client.query(
       "INSERT INTO studio_experiences(id,job_id,project_id,standards_version,outcome,evidence) VALUES($1,$2,$3,$4,'passed',$5) ON CONFLICT(job_id) DO NOTHING",
@@ -591,6 +715,15 @@ export async function restoreVersion(
   return transaction(async (client) => {
     const project = await lockedProject(client, projectId);
     assertOwner(project, ownerId);
+    if (
+      (
+        await client.query(
+          "SELECT 1 FROM studio_image_batches WHERE project_id=$1 AND status='active'",
+          [projectId],
+        )
+      ).rowCount
+    )
+      throw new StudioError('请先完成或停止批量制作。', 409);
     if (project.latest_version_id !== expected)
       throw new StudioError('项目已有更新，请刷新后再恢复。', 409);
     if (
@@ -615,6 +748,13 @@ export async function restoreVersion(
       version.canvas_snapshot || null,
       expectedCanvasRevision,
     );
+    if (project.media_kind === 'image') {
+      await client.query(
+        'UPDATE studio_projects SET latest_version_id=$2,updated_at=now() WHERE id=$1',
+        [projectId, version.id],
+      );
+      return version.id;
+    }
     const id = randomUUID();
     await client.query(
       "INSERT INTO studio_versions(id,project_id,number,commit_sha,artifact_key,artifact_hash,summary,kind,source_version_id,standards_version,validation,canvas_snapshot,development_plan) SELECT $1,project_id,(SELECT coalesce(max(number),0)+1 FROM studio_versions WHERE project_id=$2),commit_sha,artifact_key,artifact_hash,$4,'restore',id,standards_version,validation,canvas_snapshot,development_plan FROM studio_versions WHERE id=$3",
@@ -640,7 +780,7 @@ export async function publishVersion(
     if (project.released_version_id !== expected)
       throw new StudioError('发布版本已改变，请刷新后再试。', 409);
     const result = await client.query(
-      "SELECT id FROM studio_versions WHERE id=$1 AND project_id=$2 AND validation->>'browser'='true'",
+      "SELECT id FROM studio_versions WHERE id=$1 AND project_id=$2 AND (validation->>'browser'='true' OR (validation->'image' IS NOT NULL AND EXISTS (SELECT 1 FROM studio_projects p WHERE p.id=$2 AND p.media_kind='image')))",
       [versionId, projectId],
     );
     if (!result.rowCount)

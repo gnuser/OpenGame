@@ -6,6 +6,7 @@ import {
   timingSafeEqual,
 } from 'node:crypto';
 import { accessMode, appOrigin, previewOrigin, previewSecret } from './config';
+import type pg from 'pg';
 import { migrate, pool, transaction } from './db';
 import { StudioError } from './errors';
 
@@ -49,11 +50,42 @@ export async function sessionViewer(request: Request): Promise<Viewer | null> {
 export async function requireViewer(request: Request): Promise<Viewer | null> {
   const viewer = await sessionViewer(request);
   if (accessMode === 'invite' && !viewer)
-    throw new StudioError('请使用内测访问码登录。', 401);
+    throw new StudioError('请先登录工作台。', 401);
   return viewer;
 }
 export async function login(code: string): Promise<string> {
   if (accessMode !== 'invite') throw new StudioError('本机模式不需要登录。');
+  await migrate();
+  await limitLoginAttempts();
+  return transaction(async (client) => {
+    const result = await client.query(
+      'SELECT id,invited_by,invitation_rewarded_at FROM studio_users WHERE access_hash=$1 AND NOT disabled AND expires_at>now() FOR UPDATE',
+      [hashToken(code)],
+    );
+    if (!result.rows[0])
+      throw new StudioError('访问码无效或已到期，请联系邀请人。', 401);
+    const user = result.rows[0];
+    const userId = user.id;
+    // The invitee row lock makes the first-login award exactly once, even on retries.
+    if (user.invited_by && !user.invitation_rewarded_at) {
+      await client.query(
+        'UPDATE studio_users SET bonus_job_credits=bonus_job_credits+5 WHERE id=$1',
+        [user.invited_by],
+      );
+      await client.query(
+        'UPDATE studio_users SET invitation_rewarded_at=now() WHERE id=$1',
+        [userId],
+      );
+    }
+    await client.query(
+      'DELETE FROM studio_sessions WHERE user_id=$1 AND expires_at<=now()',
+      [userId],
+    );
+    return issueSession(client, userId);
+  });
+}
+
+export async function limitLoginAttempts(): Promise<void> {
   await migrate();
   // Persist the global login budget across restarts and all web processes.
   const bucket = Math.floor(Date.now() / 60000);
@@ -66,30 +98,26 @@ export async function login(code: string): Promise<string> {
   await pool().query('DELETE FROM studio_login_limits WHERE bucket<$1', [
     bucket - 60,
   ]);
-  return transaction(async (client) => {
-    const result = await client.query(
-      'SELECT id FROM studio_users WHERE access_hash=$1 AND NOT disabled AND expires_at>now() FOR UPDATE',
-      [hashToken(code)],
-    );
-    if (!result.rows[0])
-      throw new StudioError('访问码无效或已到期，请联系邀请人。', 401);
-    const userId = result.rows[0].id;
-    await client.query(
-      'DELETE FROM studio_sessions WHERE user_id=$1 AND expires_at<=now()',
-      [userId],
-    );
-    // Retain at most five devices per member; the newest login takes a slot.
-    await client.query(
-      'DELETE FROM studio_sessions WHERE token_hash IN (SELECT token_hash FROM studio_sessions WHERE user_id=$1 ORDER BY created_at DESC OFFSET 4)',
-      [userId],
-    );
-    const token = randomBytes(32).toString('base64url');
-    await client.query(
-      "INSERT INTO studio_sessions(token_hash,user_id,expires_at) VALUES($1,$2,now()+interval '7 days')",
-      [hashToken(token), userId],
-    );
-    return token;
-  });
+}
+export async function issueSession(
+  client: pg.PoolClient,
+  userId: string,
+): Promise<string> {
+  // Serialize the device cap across concurrent logins for this account.
+  await client.query('SELECT id FROM studio_users WHERE id=$1 FOR UPDATE', [
+    userId,
+  ]);
+  // Retain at most five devices per member; the newest login takes a slot.
+  await client.query(
+    'DELETE FROM studio_sessions WHERE token_hash IN (SELECT token_hash FROM studio_sessions WHERE user_id=$1 ORDER BY created_at DESC OFFSET 4)',
+    [userId],
+  );
+  const token = randomBytes(32).toString('base64url');
+  await client.query(
+    "INSERT INTO studio_sessions(token_hash,user_id,expires_at) VALUES($1,$2,now()+interval '7 days')",
+    [hashToken(token), userId],
+  );
+  return token;
 }
 export async function logout(request: Request): Promise<void> {
   const token = tokenFromRequest(request);

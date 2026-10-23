@@ -1,6 +1,9 @@
+import { performStudy } from './study';
+import { scheduleImageBatches } from './image-batch';
+import { buildImageVersion } from './image-project';
+import { generationTimeout } from './model-runtime';
 import { randomUUID } from 'node:crypto';
-import { existsSync } from 'node:fs';
-import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { setTimeout as pause } from 'node:timers/promises';
 import { artifactDir, dataRoot, projectRepo } from './config';
@@ -25,9 +28,9 @@ import {
   checkInProjectContainer,
   recoverProjectContainers,
   requireRuntimeImage,
-  RuntimeUnavailableError,
 } from './project-runtime';
 import { runCodex } from './codex';
+import { generateReviewedGame } from './game-generation';
 import { checkGeneratorSandbox } from './generator-check';
 import { canvasImages } from './canvas';
 import { planConversation } from './conversation';
@@ -71,6 +74,9 @@ await pool().query(
   "UPDATE studio_jobs SET status=CASE WHEN cancel_requested THEN 'cancelled' WHEN prepared IS NOT NULL THEN 'queued' ELSE 'failed' END,error=CASE WHEN prepared IS NULL THEN '制作进程已中断，上一可玩版本保留。可以重新提交需求。' ELSE error END,lease_token=NULL WHERE status='running'",
 );
 await recoverEvolutionChecks();
+await pool().query(
+  "UPDATE studio_study_courses SET status='failed',source=NULL,error='处理进程已中断，请重新上传。' WHERE status='running'",
+);
 async function verifyPrepared(job: Job, version: PreparedVersion) {
   if (
     (await artifactHash(artifactDir(version.artifactKey))) !==
@@ -89,7 +95,7 @@ async function verifyPrepared(job: Job, version: PreparedVersion) {
     dataRoot,
   );
 }
-async function perform(job: Job, signal: AbortSignal) {
+async function perform(job: Job, signal: AbortSignal, deadline: number) {
   if (job.kind === 'chat') {
     await jobEvent(
       job,
@@ -109,6 +115,56 @@ async function perform(job: Job, signal: AbortSignal) {
     await verifyPrepared(job, job.prepared);
     signal.throwIfAborted();
     await finishVersion(job, job.prepared);
+    return;
+  }
+  const imageDetail = await getProject(job.project_id);
+  if (imageDetail.project.media_kind === 'image') {
+    await jobEvent(job, 'preparing', '正在准备图片版本。');
+    const imageJob = job.image_batch_id
+      ? { ...job, base_version_id: job.image_reference_version_id || null }
+      : job;
+    const base = imageDetail.versions.find(
+      (v) => v.id === imageJob.base_version_id,
+    );
+    const workspace = await prepareWorkspace(imageJob, base);
+    const id = randomUUID();
+    const temporary = path.join(dataRoot, 'pending-artifacts', id);
+    const validation = await buildImageVersion(
+      imageJob,
+      imageDetail,
+      workspace,
+      temporary,
+      signal,
+    );
+    signal.throwIfAborted();
+    await jobEvent(
+      job,
+      'saving',
+      '图片解码检查通过，正在保存原尺寸图片和版本说明。',
+    );
+    const manifest = JSON.parse(
+      await readFile(path.join(workspace, 'game.project.json'), 'utf8'),
+    );
+    const prepared: PreparedVersion = {
+      id,
+      title: manifest.title,
+      artifactKey: id,
+      commitSha: await commitWorkspace(job, workspace),
+      artifactHash: await artifactHash(temporary),
+      summary: job.image_batch_id
+        ? `批量图片 ${(job.image_batch_index || 0) + 1} 已保存。${job.prompt.split('本张风格：')[1]?.split('。')[0] || ''}`
+        : job.image_asset_id
+          ? '已保存导入的图片版本，可以查看、下载或恢复历史版本。'
+          : 'Codex 已生成并保存图片新版本，可以下载或继续描述修改要求。',
+      standardsVersion,
+      validation,
+    };
+    await mkdir(path.dirname(artifactDir(id)), { recursive: true });
+    await rename(temporary, artifactDir(id));
+    await stageVersion(job, prepared);
+    await verifyPrepared(job, prepared);
+    signal.throwIfAborted();
+    await finishVersion(job, prepared);
     return;
   }
   const runtimeImage = await requireRuntimeImage();
@@ -144,59 +200,47 @@ async function perform(job: Job, signal: AbortSignal) {
   const prompt = await makePrompt(job, workspace, history, knowledge);
   const id = randomUUID();
   const temporary = path.join(dataRoot, 'pending-artifacts', id);
-  let summary = '';
-  let validation;
-  let repair = '';
-  for (let attempt = 0; attempt < 2; attempt++) {
-    signal.throwIfAborted();
-    await jobEvent(
-      job,
-      'generating',
-      attempt
-        ? '检查发现问题，正在进行一次修复。'
-        : '正在根据你的需求制作游戏。',
-    );
-    summary = await runCodex({
-      cwd: workspace,
-      prompt: `${prompt}${repair}`,
-      images: canvasImages(workspace, job.canvas_snapshot),
+  const { summary, validation } = await generateReviewedGame(
+    {
+      workspace,
+      output: temporary,
+      prompt,
+      referenceImages: canvasImages(workspace, job.canvas_snapshot),
       signal,
-      onMessage: () => {},
-      onUsage: (usage) => {
-        void pool()
-          .query(
-            "UPDATE studio_jobs SET usage=coalesce(usage,'[]'::jsonb) || $3::jsonb WHERE id=$1 AND lease_token=$2",
-            [job.id, job.lease_token, JSON.stringify([usage])],
-          )
-          .catch(() => {});
-      },
-    });
-    signal.throwIfAborted();
-    await jobEvent(
-      job,
-      'validating',
-      '正在项目独立环境中构建和打开游戏，检查开始、操作与重新开始。',
-    );
-    try {
-      if (existsSync(temporary)) await rm(temporary, { recursive: true });
-      await mkdir(path.dirname(temporary), { recursive: true });
-      validation = await checkInProjectContainer({
-        owner: 'worker',
-        projectId: job.project_id,
-        jobId: job.id,
-        workspace,
-        output: temporary,
-        image: runtimeImage,
-        signal,
-      });
-      break;
-    } catch (error) {
-      if (signal.aborted || attempt || error instanceof RuntimeUnavailableError)
-        throw error;
-      repair = `\n\n平台实际验收发现以下问题，请修复后完成：\n${error instanceof Error ? error.message : String(error)}\n`;
-    }
-  }
-  if (!validation) throw new Error('游戏尚未通过验收。');
+      mode: base ? 'modify' : 'create',
+      plan: job.plan?.production,
+      deadline,
+    },
+    {
+      generate: (input) =>
+        runCodex({
+          cwd: workspace,
+          model: job.model,
+          ...input,
+          onMessage: () => {},
+          onUsage: (usage) => {
+            void pool()
+              .query(
+                "UPDATE studio_jobs SET usage=coalesce(usage,'[]'::jsonb) || $3::jsonb WHERE id=$1 AND lease_token=$2",
+                [job.id, job.lease_token, JSON.stringify([usage])],
+              )
+              .catch(() => {});
+          },
+        }),
+      check: (output, acceptance, checkSignal) =>
+        checkInProjectContainer({
+          owner: 'worker',
+          projectId: job.project_id,
+          jobId: job.id,
+          workspace,
+          output,
+          image: runtimeImage,
+          signal: checkSignal,
+          acceptance,
+        }),
+      progress: (phase, message) => jobEvent(job, phase, message),
+    },
+  );
   signal.throwIfAborted();
   await jobEvent(job, 'saving', '检查通过，正在保存源码、项目记忆和可玩版本。');
   const manifest = JSON.parse(
@@ -210,7 +254,7 @@ async function perform(job: Job, signal: AbortSignal) {
   const memory = await readFile(memoryPath, 'utf8');
   await writeFile(
     memoryPath,
-    `${memory}\n\n## 平台验证记录 ${validation.checkedAt}\n\n本次构建、浏览器启动、输入与重新开始检查通过。此记录不代表已验证全部玩法、触屏或完整胜负流程。\n`,
+    `${memory}\n\n## 平台验证记录 ${validation.checkedAt}\n\n本次构建、启动、项目冒烟操作与独立验收场景通过；固定制作目标、评审依据与各场景结果保存在 production-report.json。行为结论来自实际输入和只读评审，表现结论是模型观察判断。未覆盖的长局、音频听感、真实触屏和用户体验不视为通过。\n`,
   );
   const learning = await readLearning(workspace);
   const commitSha = await commitWorkspace(job, workspace, knowledge);
@@ -244,14 +288,21 @@ const health = setInterval(() => {
 }, 2000);
 try {
   while (!stopping) {
+    await scheduleImageBatches();
     const job = await claimJob();
     if (!job) {
       const controller = new AbortController();
       active = controller;
-      const timeout = setTimeout(() => controller.abort(), 180000);
+      // Document lessons need time for extraction, source checking and a full question bank.
+      let timeout = setTimeout(() => controller.abort(), 600000);
       let worked = false;
       try {
-        worked = await performNextEvolutionCheck(controller.signal);
+        worked = await performStudy(controller.signal);
+        if (!worked) {
+          clearTimeout(timeout);
+          timeout = setTimeout(() => controller.abort(), 180000);
+          worked = await performNextEvolutionCheck(controller.signal);
+        }
       } finally {
         clearTimeout(timeout);
         active = undefined;
@@ -262,13 +313,11 @@ try {
     const controller = new AbortController();
     active = controller;
     let timedOut = false;
-    const timeout = setTimeout(
-      () => {
-        timedOut = true;
-        controller.abort();
-      },
-      Number(process.env.OPENGAME_JOB_TIMEOUT_MS || 600000),
-    );
+    const deadline = Date.now() + generationTimeout(job.model);
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, generationTimeout(job.model));
     const cancelPoll = setInterval(() => {
       void pool()
         .query(
@@ -281,7 +330,7 @@ try {
         .catch(() => controller.abort());
     }, 600);
     try {
-      await perform(job, controller.signal);
+      await perform(job, controller.signal, deadline);
     } catch (error) {
       await failJob(
         job,

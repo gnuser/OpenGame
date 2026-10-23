@@ -17,7 +17,7 @@ import {
 } from '../../src/server/store';
 import { saveCanvas } from '../../src/server/canvas';
 import type { DevelopmentPlan } from '../../src/shared/development';
-import type { Job, PreparedVersion } from '../../src/shared/types';
+import type { PreparedVersion } from '../../src/shared/types';
 
 let admin: pg.Client;
 const name = `opengame_conversation_${process.pid}`;
@@ -43,6 +43,28 @@ const plan: DevelopmentPlan = {
     { title: '连击计分', detail: '连续收集星星提高奖励，重新开始清零。' },
   ],
   checks: ['收集后分数变化，重开回到零分'],
+  production: {
+    coreLoop: '收集星星，连续收集获得连击奖励',
+    firstPlayable: '沿用已有场景验证连续收集和重开',
+    completion: '本轮只增加连击奖励并保留移动方式',
+    visualDirection: '保持原有机器人主题，让奖励可辨',
+    feedback: '收集时显示得分与连击反馈',
+    assumptions: ['保持已有素材'],
+    criteria: [
+      {
+        id: 'combo-reward',
+        stage: 'slice',
+        kind: 'behavior',
+        expectation: '连续收集提高奖励，重开清零',
+      },
+      {
+        id: 'reward-readable',
+        stage: 'slice',
+        kind: 'presentation',
+        expectation: '分数与连击反馈清楚可辨',
+      },
+    ],
+  },
 };
 async function chat(prompt = '先讨论连击奖励，暂不修改') {
   const p = await submitJob({ prompt, kind: 'chat', requestKey: randomUUID() });
@@ -302,6 +324,57 @@ test('discussion has its own bounded quota and cannot bypass a full implementati
   );
   assert.equal(
     (await getProject(project.projectId, owner.id)).versions.length,
+    1,
+  );
+});
+
+test('planning uses bonus credits exactly once after base quota is exhausted', async () => {
+  const user = await createInvitation('Planning bonus');
+  await pool().query(
+    'UPDATE studio_users SET daily_job_limit=1,total_job_limit=1,bonus_job_credits=1 WHERE id=$1',
+    [user.id],
+  );
+  const base = await submitJob({
+    ownerId: user.id,
+    prompt: 'Base',
+    requestKey: randomUUID(),
+  });
+  await cancelJob(base.jobId, user.id);
+  const input = {
+    ownerId: user.id,
+    projectId: base.projectId,
+    kind: 'chat' as const,
+    prompt: 'Implement',
+    requestKey: randomUUID(),
+  };
+  await submitJob(input);
+  const job = (await claimJob())!;
+  const build = await finishPlanning(job, {
+    action: 'implement',
+    reply: '开始制作',
+    plan,
+  });
+  assert.equal(build.kind, 'build');
+  await assert.rejects(
+    finishPlanning(job, { action: 'implement', reply: '开始制作', plan }),
+    /执行权失效/,
+  );
+  await failJob(build, 'test failure');
+  await submitJob({ ...input, requestKey: randomUUID() });
+  const waiting = await finishPlanning((await claimJob())!, {
+    action: 'implement',
+    reply: '开始制作',
+    plan,
+  });
+  assert.equal(waiting.kind, 'chat');
+  assert.match(waiting.planning_reply!, /次数已达上限/);
+  assert.equal(
+    (
+      await pool().query(
+        'SELECT count(*)::int AS n FROM studio_jobs WHERE project_id=$1 AND uses_bonus',
+        [base.projectId],
+      )
+    ).rows[0].n,
     1,
   );
 });

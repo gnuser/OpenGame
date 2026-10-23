@@ -16,7 +16,7 @@ export interface RegressionCaseResult {
   id: string;
   title: string;
   passed: boolean;
-  tests: { name: string; passed: boolean }[];
+  tests: Array<{ name: string; passed: boolean }>;
   durationMs: number;
 }
 export interface RegressionReport {
@@ -48,5 +48,5 @@ export interface EvolutionOverview {
   candidates: EvolutionCandidate[];
   releases: KnowledgeRelease[];
   sources: KnowledgeEntry[];
-  benchmarks: { id: string; title: string; testCount: number }[];
+  benchmarks: Array<{ id: string; title: string; testCount: number }>;
 }
